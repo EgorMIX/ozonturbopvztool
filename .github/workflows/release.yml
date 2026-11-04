@@ -1,0 +1,44 @@
+# Релиз по тегу v<версия>: проверка, сборка zip и GitHub Release с текстом из CHANGELOG.md.
+#   git tag v1.5.0 && git push origin v1.5.0
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Тег совпадает с версией в manifest.json
+        run: |
+          ver=$(node -p "require('./extension/manifest.json').version")
+          if [ "v$ver" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Тег $GITHUB_REF_NAME не совпадает с версией manifest.json ($ver)"; exit 1
+          fi
+          echo "VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: Проверка и сборка
+        run: node scripts/pack.mjs
+
+      - name: Текст релиза из CHANGELOG.md
+        run: |
+          awk -v v="$VERSION" '
+            /^## / { if (on) exit; on = index($0, "## " v) == 1; next }
+            on { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::В CHANGELOG.md нет раздела «## $VERSION»"; exit 1
+          fi
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "dist/ozon-turbo-pvz-$VERSION.zip" \
+            --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag

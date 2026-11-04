@@ -21,19 +21,27 @@ ntfy) на порогах 30/15/5 минут. Второй модуль — «А
 3. Логи: service worker — ссылка «Service worker» на карточке расширения; popup — ПКМ по иконке → «Проверить
    всплывающее окно»; content-скрипты — консоль вкладки Ozon (`[PVZ…]`).
 
-Проверить правку в браузере ты не можешь — в ответе пиши владельцу, **что именно открыть и нажать** и что должно произойти.
+Живой Ozon тебе недоступен — в ответе пиши владельцу, **что именно открыть и нажать** и что должно произойти. Если в
+среде есть Playwright с Chromium, расширение можно загрузить по-настоящему: `chromium.launchPersistentContext(dir,
+{ headless: true, channel: 'chromium', args: ['--disable-extensions-except=<extension>', '--load-extension=<extension>'] })`,
+service worker — `ctx.serviceWorkers()`, popup — `chrome-extension://<id>/popup.html`, а страницы
+`turbo-pvz.ozon.ru` подменить через `ctx.route()` HTML из `docs/fixtures/`. Скрипты такой проверки держи вне репозитория
+(Playwright — не зависимость проекта).
 
 ## Структура
 ```
 extension/            ← код расширения; только это грузится в Chrome и пакуется в zip
-  manifest.json       MV3, версия 1.4.0
+  manifest.json       MV3, версия 1.5.0, Chrome ≥ 108
   background.js       service worker: состояние, алармы, push/голос/Telegram/ntfy, прокси, режимы
   content.js          поиск таймера на /receiving…, шлёт секунды в SW
   speech.js           озвучка (SpeechSynthesis) по сообщению SPEAK
   bags-content.js     «Авто-пакеты» на /orders/session-new/<id>
   popup.html / .js    интерфейс: вкладки «Таймер» и «Пакеты», настройки, тесты, отладка, журнал
 scripts/              check.mjs, pack.mjs, known-issues.json
-docs/                 architecture.md, known-issues.md, backend-idea.md, fixtures/ (HTML-образцы страниц Ozon)
+docs/                 architecture.md, known-issues.md, backend-idea.md, store-listing.md, fixtures/ (HTML-образцы Ozon)
+.github/workflows/    check.yml (npm run check:strict на PR), release.yml (тег v<версия> → zip + GitHub Release)
+README.md, CHANGELOG.md, PRIVACY.md, SECURITY.md, LICENSE (GPL-3) — публичные документы; меняешь поведение или
+права — обнови CHANGELOG.md (раздел будущей версии), а при новых данных/правах — PRIVACY.md и docs/store-listing.md
 ```
 Подробности — не дублирую, читай по необходимости:
 - `docs/architecture.md` — потоки данных, таблица сообщений, схема `chrome.storage`, алармы, DOM Ozon, подводные камни.
@@ -54,7 +62,8 @@ docs/                 architecture.md, known-issues.md, backend-idea.md, fixture
 4. **HTTP-заголовки только ISO-8859-1.** Кириллицу и эмодзи в заголовки не класть. ntfy отправляется JSON-API
    (`POST <server>` с телом `{topic, message, title, …}`) — не возвращай заголовки `Title`/`Tags`.
 5. **Новое сообщение** между частями расширения = ветка в `onMessage` в `background.js` + отправитель; типы пиши
-   ЗАГЛАВНЫМИ_С_ПОДЧЁРКИВАНИЕМ. Новая настройка = дефолт в `background.js` (`DEFAULT_SETTINGS`) **и** в `popup.js` (`settings`).
+   ЗАГЛАВНЫМИ_С_ПОДЧЁРКИВАНИЕМ. Сообщение от content-скрипта ещё добавь в `CONTENT_MSG_TYPES` (иначе `forbidden`).
+   Тесты каналов не меняют общий `settings` — передавай данные параметром. Новая настройка = дефолт в `background.js` (`DEFAULT_SETTINGS`) **и** в `popup.js` (`settings`).
 6. **Content-скрипты** перед любым `chrome.*` проверяют `chrome.runtime?.id` (расширение могло перезагрузиться).
 7. **Секреты** (токен Telegram-бота, токен/топик ntfy, логин/пароль прокси) живут только в `chrome.storage.local` и в
    интерфейсе. Не клади их в репозиторий, фикстуры, логи, сообщения коммитов. Перед сохранением логов консоли или HTML с
@@ -62,8 +71,9 @@ docs/                 architecture.md, known-issues.md, backend-idea.md, fixture
    `npm run check` ловит типичные токены, но это страховка, а не замена внимательности.
 8. **Разрешения и `host_permissions`** в манифесте — только то, что реально нужно; расширение набора может потребовать от
    владельца повторного подтверждения в Chrome — упомяни это в ответе.
-9. **Не коммить и не пушь, пока владелец не попросил.** Версию в `manifest.json` не меняй сама; при ближайшем релизе её
-   нужно поднять до 1.5.0 (модуль пакетов добавлен после 1.4.0).
+9. **Коммить и пушь сама**, когда правка готова и `npm run check` проходит (в рабочую ветку, не в `main`). Версию в
+   `manifest.json` не меняй сама (последняя — 1.5.0); релиз — тег `v<версия>`, совпадающий с `manifest.json`, и
+   раздел `## <версия>` в CHANGELOG.md.
 10. Новых зависимостей и сборщиков не добавляй без просьбы: расширение — простые файлы, загружаемые «как есть».
 
 ## Что сломано или рискованно (кратко; подробно, с планом исправления — `docs/known-issues.md`)

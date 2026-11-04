@@ -1,5 +1,5 @@
 // speech.js — Content script для озвучки через Web Speech API
-// Запускается на всех страницах Ozon, слушает команду от background
+// Подключается на turbo-pvz.ozon.ru, слушает команду SPEAK от background
 
 'use strict';
 

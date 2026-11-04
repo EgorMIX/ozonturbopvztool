@@ -18,7 +18,7 @@
 
 | Файл | Роль |
 |---|---|
-| `manifest.json` | MV3. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions` ещё на `*.ozon.ru`, `*.ozon.com`, `api.telegram.org`, `ntfy.sh`. |
+| `manifest.json` | MV3, 1.5.0, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
 | `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси (PAC только для `api.telegram.org`, логин HTTP-прокси через `webRequest.onAuthRequired`), режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
 | `content.js` | Находит таймер на странице приёмки (`/receiving…`), раз в 10 с шлёт секунды в SW. Следит за SPA-навигацией. |
 | `speech.js` | Слушает `SPEAK`, говорит через `speechSynthesis` (ru-RU, rate 0.95). Если скрипта во вкладке нет — SW подставляет ту же функцию через `scripting.executeScript`. |
@@ -63,7 +63,8 @@
 | type | откуда → куда | payload | ответ |
 |---|---|---|---|
 | `TIMER_FOUND` | content → bg | `{seconds, url, title, debugInfo}` | `{ok}` |
-| `TIMER_LOST` | content / popup → bg | — | `{ok}` |
+| `TIMER_LOST` | content → bg | — (таймер пропал; приёмка завершится через 2 мин) | `{ok}` |
+| `TIMER_CLEAR` | popup → bg | — (кнопка «Сбросить»: завершить приёмку сразу) | `{ok}` |
 | `TIMER_MANUAL` | popup → bg | `{seconds}` | `{ok}` |
 | `GET_STATE` | popup → bg | — | `{timerState, settings, modeState}` |
 | `GET_LOG` | popup → bg | — | `{log: [{text, type}]}` |
@@ -76,9 +77,12 @@
 | `DEBUG_SIM_TIMER` / `DEBUG_CLEAR_ALARMS` / `DEBUG_RESET` | popup → bg | `{seconds?}` / — / — | `{ok}` |
 | `SPEAK` | bg → вкладка (speech.js) | `{text, volume}` | — |
 | `GET_PAGE_INFO` | popup → вкладка (content.js) | — | `{url, allowed, title, timerFound, seconds}` |
-| `GET_TIMER_STATUS`, `SET_DEBUG_MODE` | (никто не шлёт) → content.js | — / `{enabled}` | заготовки, см. `known-issues.md` |
 
 Новое сообщение = ветка в `background.js` (`chrome.runtime.onMessage`, цепочка `if / else if`) **и** отправитель.
+Отправителя проверяет `isAllowedSender()`: страницы расширения (popup — и окном, и во вкладке) определяются по адресу
+`chrome-extension://<id>/…` и могут всё; от вкладок `https://turbo-pvz.ozon.ru/` принимаются только `CONTENT_MSG_TYPES`
+(`TIMER_FOUND`, `TIMER_LOST`). Новое сообщение от content-скрипта
+нужно добавить в `CONTENT_MSG_TYPES`, иначе оно получит `{ok:false, reason:'forbidden'}`.
 `npm run check` ругается, если тип отправляется, но не обрабатывается, или обрабатывается в двух ветках.
 
 ## `chrome.storage.local`

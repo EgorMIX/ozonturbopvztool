@@ -230,7 +230,8 @@ document.getElementById('btnSetManual').addEventListener('click', () => {
 });
 
 document.getElementById('btnClearManual').addEventListener('click', () => {
-  chrome.runtime.sendMessage({ type: 'TIMER_LOST' }, () => { log('Таймер сброшен', 'warn'); render(null); });
+  // TIMER_CLEAR завершает приёмку сразу (TIMER_LOST от страницы ждёт LOST_GRACE_MIN)
+  chrome.runtime.sendMessage({ type: 'TIMER_CLEAR' }, () => { log('Таймер сброшен', 'warn'); render(null); });
   manualInput.value = '';
 });
 
@@ -282,6 +283,19 @@ document.getElementById('btnAddThreshold').addEventListener('click', () => {
 // ─── Сохранение ───────────────────────────────────────────────────────────
 
 document.getElementById('saveBtn').addEventListener('click', () => {
+  const btn = document.getElementById('saveBtn');
+  const showBtnError = (text) => {
+    btn.textContent = text;
+    setTimeout(() => { btn.textContent = '💾 Сохранить настройки'; }, 3000);
+  };
+  // Порог идентифицируется минутами — два порога с одинаковыми минутами мешали бы друг другу
+  const mins = settings.thresholds.map(t => t.minutes);
+  const dup  = mins.find((m, i) => mins.indexOf(m) !== i);
+  if (dup !== undefined) { log(`Два порога на ${dup} мин — измените один`, 'err'); showBtnError(`⚠️ Два порога на ${dup} мин`); return; }
+  const ntfyFields = readNtfyFields();
+  if (ntfyFields.enabled && !/^https:\/\/[^\s/]+/i.test(ntfyFields.server)) {
+    log('Сервер ntfy должен начинаться с https://', 'err'); showBtnError('⚠️ ntfy: нужен https://'); return;
+  }
   settings.thresholds    = settings.thresholds.map(t => ({ ...t, enabled: true }));
   settings.telegram      = {
     enabled:  document.getElementById('tgEnabled').checked,
@@ -298,7 +312,6 @@ document.getElementById('saveBtn').addEventListener('click', () => {
   chrome.storage.local.set({ pvzSettings: settings }, () => {
     chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings });
     log('Настройки сохранены', 'ok');
-    const btn = document.getElementById('saveBtn');
     btn.textContent = '✅ Сохранено!'; btn.classList.add('saved');
     setTimeout(() => { btn.textContent = '💾 Сохранить настройки'; btn.classList.remove('saved'); }, 1500);
   });
@@ -349,11 +362,32 @@ document.getElementById('tgEnabled').addEventListener('change', updateTgVisibili
 document.getElementById('tgBotFather').addEventListener('click', (e) => {
   e.preventDefault(); chrome.tabs.create({ url: 'https://t.me/BotFather' });
 });
-document.getElementById('tgGetUpdates').addEventListener('click', (e) => {
+// Chat ID ищем запросом getUpdates прямо из popup, а не вкладкой: иначе токен бота остаётся в истории браузера
+document.getElementById('tgGetUpdates').addEventListener('click', async (e) => {
   e.preventDefault();
-  const token = document.getElementById('tgBotToken').value.trim();
-  if (token) chrome.tabs.create({ url: `https://api.telegram.org/bot${token}/getUpdates` });
-  else alert('Сначала введите Bot Token');
+  const status = document.getElementById('tgStatus');
+  const token  = document.getElementById('tgBotToken').value.trim();
+  const show = (text, cls) => { status.textContent = text; status.className = `tg-status ${cls}`; setTimeout(() => { status.textContent = ''; }, 7000); };
+  if (!token) { show('❌ Сначала введите Bot Token', 'err'); return; }
+  status.textContent = '⏳ Ищем чаты…'; status.className = 'tg-status';
+  try {
+    const resp = await fetch(`https://api.telegram.org/bot${token}/getUpdates`, { signal: AbortSignal.timeout(15000) });
+    const data = await resp.json();
+    if (!data.ok) { show(`❌ ${data.description || 'ошибка Telegram'}`, 'err'); return; }
+    const chats = new Map();
+    for (const u of data.result || []) {
+      const c = (u.message || u.channel_post || u.my_chat_member || u.edited_message)?.chat;
+      if (c?.id != null) chats.set(String(c.id), c.title || c.username || c.first_name || '');
+    }
+    if (!chats.size) { show('❌ Сообщений нет — напишите боту любое сообщение и нажмите ещё раз', 'err'); return; }
+    const [firstId] = chats.keys();
+    document.getElementById('tgChatId').value = firstId;
+    show(chats.size === 1
+      ? `✅ Chat ID подставлен: ${firstId} (${chats.get(firstId)})`
+      : `✅ Подставлен ${firstId}; ещё чаты: ${[...chats.keys()].slice(1).join(', ')}`, 'ok');
+  } catch (err) {
+    show(`❌ ${err?.name === 'TimeoutError' ? 'Telegram не ответил за 15 с' : err.message}`, 'err');
+  }
 });
 
 document.getElementById('btnTestTg').addEventListener('click', () => {

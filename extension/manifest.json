@@ -1,23 +1,21 @@
 {
   "manifest_version": 3,
   "name": "Ozon Turbo-PVZ Timer",
-  "version": "1.4.0",
-  "description": "Уведомление до истечения таймера приёмки на Ozon Turbo-PVZ",
+  "version": "1.5.0",
+  "description": "Неофициальный помощник для Turbo-PVZ: оповещения до конца приёмки (голос, push, Telegram, ntfy) и авто-пакеты.",
+  "minimum_chrome_version": "108",
+  "homepage_url": "https://github.com/EgorMIX/ozonturbopvztool",
   "permissions": [
     "notifications",
     "alarms",
     "storage",
-    "activeTab",
     "scripting",
-    "tabs",
     "proxy",
     "webRequest",
     "webRequestAuthProvider"
   ],
   "host_permissions": [
     "*://turbo-pvz.ozon.ru/*",
-    "*://*.ozon.ru/*",
-    "*://*.ozon.com/*",
     "*://api.telegram.org/*",
     "*://ntfy.sh/*"
   ],
@@ -43,16 +41,6 @@
         "bags-content.js"
       ],
       "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "speech.js"
-      ],
-      "matches": [
-        "*://turbo-pvz.ozon.ru/*"
-      ]
     }
   ],
   "action": {
