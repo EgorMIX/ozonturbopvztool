@@ -1,0 +1,13 @@
+{
+  "name": "ozon-turbo-pvz",
+  "private": true,
+  "description": "Chrome-расширение Ozon Turbo-PVZ Timer (код — в папке extension/). Зависимостей нет: package.json нужен только ради команд.",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "check:strict": "node scripts/check.mjs --strict",
+    "pack": "node scripts/pack.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

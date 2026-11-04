@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node scripts/check.mjs:*)",
+      "Bash(node scripts/pack.mjs:*)",
+      "Bash(npm run check:*)",
+      "Bash(npm run pack:*)"
+    ]
+  }
+}

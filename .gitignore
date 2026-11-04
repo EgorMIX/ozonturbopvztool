@@ -1,0 +1,18 @@
+# сборка
+dist/
+*.zip
+
+# зависимости (если появятся)
+node_modules/
+
+# мусор ОС и редакторов
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# личное: локальные настройки Claude Code, секреты, логи
+.claude/settings.local.json
+.env
+.env.*
+*.log
