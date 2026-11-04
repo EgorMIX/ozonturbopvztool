@@ -1,10 +1,14 @@
-# Релиз по тегу v<версия>: проверка, сборка zip и GitHub Release с текстом из CHANGELOG.md.
-#   git tag v1.5.0 && git push origin v1.5.0
+# Релиз: проверка, сборка zip и GitHub Release с текстом из CHANGELOG.md.
+# Запустить можно двумя способами:
+#   1) с сайта: Actions → release → Run workflow (ветка main) — тег v<версия из manifest.json> создастся сам;
+#   2) из терминала: git tag v1.5.0 && git push origin v1.5.0
+# Если релиз с этим тегом уже создан вручную («Draft a new release»), zip просто добавится к нему.
 name: release
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,13 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Тег совпадает с версией в manifest.json
+      - name: Версия и тег
         run: |
           ver=$(node -p "require('./extension/manifest.json').version")
-          if [ "v$ver" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Тег $GITHUB_REF_NAME не совпадает с версией manifest.json ($ver)"; exit 1
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::Запускайте с ветки main (сейчас $GITHUB_REF_NAME)"; exit 1
+            fi
+            tag="v$ver"
+          else
+            tag="$GITHUB_REF_NAME"
+            if [ "$tag" != "v$ver" ]; then
+              echo "::error::Тег $tag не совпадает с версией manifest.json ($ver)"; exit 1
+            fi
           fi
           echo "VERSION=$ver" >> "$GITHUB_ENV"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
 
       - name: Проверка и сборка
         run: node scripts/pack.mjs
@@ -40,5 +53,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "dist/ozon-turbo-pvz-$VERSION.zip" \
-            --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag
+          zip="dist/ozon-turbo-pvz-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Релиз $TAG уже есть — добавляю zip"
+            gh release upload "$TAG" "$zip" --clobber
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
+              echo "::error::Тег $TAG уже есть, но релиза нет — запустите workflow по тегу или удалите тег"; exit 1
+            fi
+            gh release create "$TAG" "$zip" --title "$TAG" --notes-file release-notes.md --target "$GITHUB_SHA"
+          else
+            gh release create "$TAG" "$zip" --title "$TAG" --notes-file release-notes.md --verify-tag
+          fi

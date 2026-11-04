@@ -66,8 +66,9 @@ content-скрипт). Логи: service worker — ссылка «Service worke
 «Проверить всплывающее окно»; content-скрипты — консоль вкладки Ozon (`[PVZ…]`).
 
 **Релиз:** поднять `version` в `extension/manifest.json`, дописать [CHANGELOG.md](CHANGELOG.md), смержить в `main`,
-поставить тег `v<версия>` (например, `git tag v1.5.0 && git push origin v1.5.0`) — GitHub Actions соберёт zip и
-создаст релиз. Проверка `npm run check` запускается на каждый pull request.
+затем на GitHub: **Actions → release → Run workflow** (ветка `main`) — workflow сам создаст тег `v<версия>`, соберёт
+zip и опубликует релиз. Или из терминала: `git tag v1.5.0 && git push origin v1.5.0`. Проверка `npm run check`
+запускается на каждый pull request.
 
 Документы:
 - [`CLAUDE.md`](CLAUDE.md) — правила и контекст для Claude Code (проект ведётся с его помощью)
