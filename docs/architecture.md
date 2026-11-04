@@ -19,7 +19,7 @@
 | Файл | Роль |
 |---|---|
 | `manifest.json` | MV3. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions` ещё на `*.ozon.ru`, `*.ozon.com`, `api.telegram.org`, `ntfy.sh`. |
-| `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси, режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
+| `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси (PAC только для `api.telegram.org`, логин HTTP-прокси через `webRequest.onAuthRequired`), режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
 | `content.js` | Находит таймер на странице приёмки (`/receiving…`), раз в 10 с шлёт секунды в SW. Следит за SPA-навигацией. |
 | `speech.js` | Слушает `SPEAK`, говорит через `speechSynthesis` (ru-RU, rate 0.95). Если скрипта во вкладке нет — SW подставляет ту же функцию через `scripting.executeScript`. |
 | `bags-content.js` | Модуль «Авто-пакеты» (v2.1): на странице выдачи сам нажимает «+» у пакетов M/L; фильтр размера, лимиты, накопительная статистика. |
@@ -30,10 +30,13 @@
    `URL_WHITELIST` (сейчас фактически `turbo-pvz.ozon.ru/receiving…`), ищет элемент таймера и парсит секунды
    (`HH:MM:SS`, строго `MM:SS`, «X ч Y мин Z сек»; максимум 24 ч).
 2. Если значение отличается от последнего отправленного больше чем на 5 с — `TIMER_FOUND {seconds, url, title, debugInfo}`.
-   Элемент пропал → `TIMER_LOST`. При SPA-навигации интервал пересоздаётся, `TIMER_LOST` при этом **не** шлётся
+   Элемент пропал → `TIMER_LOST` (SW не стирает приёмку сразу — см. п. 3). При SPA-навигации интервал пересоздаётся, `TIMER_LOST` при этом **не** шлётся
    (таймер в SW продолжает идти по экстраполяции).
-3. `background.js` кладёт `timerState = {seconds, updatedAt, …}`; текущий остаток всегда считается как
-   `seconds − (now − updatedAt)/1000`. Для каждого включённого порога создаётся аларм `threshold_<мин>_<idx>`
+3. `background.js` кладёт `timerState = {seconds, updatedAt, endsAt, …}`. **Сессия приёмки** = абсолютное время
+   окончания `endsAt = now + seconds·1000`: новое чтение с `endsAt` в пределах ±90 с — та же приёмка (пороги и «Приёмка
+   начата» не повторяются), иначе новая (сброс `firedFor`/`startNotified`). Остаток — `remainingSeconds()` =
+   `(endsAt − now)/1000`. `TIMER_LOST` только ставит `lostAt` и аларм `timer_lost_grace` (2 мин); если за это время
+   таймер не вернулся — `endSession()` снимает алармы порогов и бейдж. Для каждого включённого порога создаётся аларм `threshold_<мин>_<idx>`
    на момент «остаток − порог»; если порог уже пройден и не срабатывал — срабатывает сразу.
 4. `fireThreshold()` (один раз на порог за сессию, см. `firedFor`) → push (`requireInteraction` при ≤5 мин),
    голос, Telegram, ntfy — в зависимости от `notifType` и включённых каналов.
@@ -47,10 +50,12 @@
 - Работает на `/orders/session/<id>/…` и `/orders/session-new/<id>` (новый единый экран выдачи).
 - Находит подписи вида «Пакет M • доступно 2» (`[class*="paragraph-large"]`, regex
   `(?:Пакет\s+)?([ML])\s*[•·]\s*доступно\s+(\d+)`), берёт **родителя** подписи и в нём `input[inputmode="decimal"]`
-  и `[class*="increment"]`, кликает «+» с шагом 150 мс до `доступно`.
+  и `[class*="increment"]`, кликает «+» с шагом 150 мс до `доступно`, но не больше остатка лимита. Одна серия за раз (`inFlight`); перед каждым
+  кликом проверяются input и лимит; статистика пишется в storage один раз в конце серии («прочитать → прибавить → записать»).
 - Настройки: `pvzSettings.bagsEnabled`, `bagsSizes` (`M`/`L`/`both`), `bagsQuota {M, L}` (0 = без лимита).
   Счётчик выданных — `bagsSessionStats {M, L, updatedAt}`; когда лимиты по всем выбранным размерам выполнены,
-  наблюдатель останавливается. Сброс — кнопка в popup.
+  наблюдатель останавливается; сброс статистики (кнопка в popup) или изменение лимита запускает его снова
+  (`storage.onChanged`). Сохранение на вкладке «Пакеты» **не** шлёт `SETTINGS_UPDATED`.
 - Навигация (SPA) отслеживается опросом `location.href` раз в 300 мс + `MutationObserver` с дебаунсом 200 мс.
 
 ## Сообщения (`chrome.runtime.sendMessage` / `tabs.sendMessage`)
@@ -81,7 +86,7 @@
 | Ключ | Кто пишет | Содержимое |
 |---|---|---|
 | `pvzSettings` | popup | `thresholds [{minutes, text, volume, enabled}]` (по умолчанию 30/15/5), `notifType` (`both`/`push`/`voice`; из него SW выводит `speechEnabled`/`notifEnabled`), `theme`, `telegram {enabled, botToken, chatId}`, `ntfy {enabled, topic, server, token, priority}`, `proxy {enabled, type, host, port, username, password}`, `bagsEnabled`, `bagsSizes`, `bagsQuota {M, L}` |
-| `timerState` | bg | `{seconds, updatedAt, url, title, firedFor [минуты], isManual, startNotified}` |
+| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified}` |
 | `modeState` | bg | `{mode, pauseUntil}` |
 | `bagsSessionStats` | bags-content, popup (сброс) | `{M, L, updatedAt}` |
 
@@ -90,7 +95,7 @@
 
 ## Алармы (`chrome.alarms`)
 `badge_tick` (периодический), `pause_end` (разовый), `threshold_<мин>_<idx>` (разовые, пересоздаются при каждом
-новом/изменённом таймере).
+новом/изменённом таймере), `timer_lost_grace` (разовый: таймер пропал со страницы — через 2 мин завершить приёмку).
 
 ## Страницы и DOM Ozon
 - Приёмка: `https://turbo-pvz.ozon.ru/receiving-v2/main`, таймер — `div` с классом `_timer_<хэш> ozi-heading-300`,
@@ -103,7 +108,8 @@
 
 ## Подводные камни платформы (выучено на практике)
 - **Service worker эфемерный** (~30 с простоя): переменные теряются, state надо грузить из storage и
-  дожидаться до обработки событий (пока не сделано — `known-issues.md`, п. 1).
+  дожидаться до обработки событий. В `background.js` это промис `ready`: `onAlarm` и `onButtonClicked` начинаются
+  с `await ready`, `onMessage` вызывает `handleMessage` через `ready.then(...)` и всегда возвращает `true`.
 - **Content-скрипт «осиротевает»** после перезагрузки расширения: вкладка держит старую копию →
   `Extension context invalidated`. Везде, где content-скрипт зовёт `chrome.*`, проверяем `chrome.runtime?.id`.
   Разработчику: после ⟳ расширения всегда обновлять и вкладку Ozon.

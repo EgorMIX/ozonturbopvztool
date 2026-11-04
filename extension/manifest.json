@@ -10,7 +10,9 @@
     "activeTab",
     "scripting",
     "tabs",
-    "proxy"
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider"
   ],
   "host_permissions": [
     "*://turbo-pvz.ozon.ru/*",

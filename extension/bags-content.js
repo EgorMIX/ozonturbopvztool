@@ -18,7 +18,10 @@
   // Запоминаем сколько уже кликнули для каждого типа пакета
   // { 'M': 2, 'L': 1 } — чтобы не кликать повторно если available не изменился
   const filled = {};
+  // Копия bagsSessionStats из storage (обновляется через onChanged — сброс в popup, другие вкладки)
   let sessionStats = { M: 0, L: 0 };
+  let inFlight     = false; // идёт серия кликов — второй tryFill не запускаем
+  let rerun        = false; // DOM менялся во время серии — после неё прогнать ещё раз
 
   // ─── Загрузка настройки ───────────────────────────────────────────────────
 
@@ -33,12 +36,23 @@
   });
 
   chrome.storage.onChanged.addListener((changes) => {
+    if (changes.bagsSessionStats) {
+      const s = changes.bagsSessionStats.newValue || {};
+      const wasLower = (s.M || 0) < sessionStats.M || (s.L || 0) < sessionStats.L;
+      sessionStats = { M: s.M || 0, L: s.L || 0 };
+      // Сброс статистики освобождает лимит — снова начинаем наблюдать
+      if (wasLower && enabled) {
+        console.log(`[PVZ-Bags v${VERSION}] статистика сброшена → M:${sessionStats.M} L:${sessionStats.L}`);
+        init();
+      }
+    }
     if (changes.pvzSettings?.newValue) {
       const newVal     = changes.pvzSettings.newValue;
       const next       = newVal.bagsEnabled !== false;
       const nextSizes  = newVal.bagsSizes || 'both';
       const nextQuotaM = newVal.bagsQuota?.M || 0;
       const nextQuotaL = newVal.bagsQuota?.L || 0;
+      const quotaChanged = nextQuotaM !== bagsQuota.M || nextQuotaL !== bagsQuota.L;
       bagsQuota = { M: nextQuotaM, L: nextQuotaL };
       if (next !== enabled || nextSizes !== bagsSizes) {
         enabled   = next;
@@ -46,6 +60,10 @@
         console.log(`[PVZ-Bags v${VERSION}] авто-пакеты → ${enabled ? 'вкл' : 'выкл'} sizes=${bagsSizes} quota=M:${bagsQuota.M} L:${bagsQuota.L}`);
         Object.keys(filled).forEach(k => delete filled[k]);
         enabled ? init() : stopObserving();
+      } else if (quotaChanged && enabled) {
+        // Лимит изменён — наблюдатель мог быть остановлен по достижении старого лимита
+        console.log(`[PVZ-Bags v${VERSION}] лимит → M:${bagsQuota.M} L:${bagsQuota.L}`);
+        init();
       }
     }
   });
@@ -173,50 +191,77 @@
     });
   }
 
-  function saveStats() {
-    chrome.storage.local.set({
-      bagsSessionStats: { M: sessionStats.M, L: sessionStats.L, updatedAt: Date.now() }
-    });
+  // Сколько ещё можно кликнуть по лимиту (pending — клики текущей серии, ещё не записанные в storage)
+  function quotaLeft(label, pending) {
+    const quota = bagsQuota[label] || 0;
+    if (quota <= 0) return Infinity;
+    return Math.max(quota - (sessionStats[label] || 0) - (pending[label] || 0), 0);
   }
 
-  function tryFill() {
+  // Прибавляем клики серии к статистике: «прочитать → прибавить → записать» один раз в конце серии,
+  // чтобы не затереть сброс из popup и клики из другой вкладки Ozon.
+  async function addStats(pending) {
+    if (!chrome.runtime?.id) return;
+    const data = await chrome.storage.local.get('bagsSessionStats');
+    const s = data.bagsSessionStats || {};
+    sessionStats = { M: (s.M || 0) + (pending.M || 0), L: (s.L || 0) + (pending.L || 0) };
+    await chrome.storage.local.set({ bagsSessionStats: { ...sessionStats, updatedAt: Date.now() } });
+  }
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+  async function tryFill() {
+    if (inFlight) { rerun = true; return; }
     if (!enabled || !isTargetPage()) return;
 
     const blocks = findPackageBlocks();
     if (blocks.length === 0) return;
 
-    for (const { label, available, plusBtn, input } of blocks) {
-      // Пропускаем размер который не нужно заполнять
-      if (!shouldFill(label)) {
-        console.log(`[PVZ-Bags v${VERSION}] ${label}: пропущен (sizes=${bagsSizes})`);
-        continue;
+    inFlight = true;
+    rerun    = false;
+    const pending = { M: 0, L: 0 };
+    try {
+      for (const { label, available, plusBtn, input } of blocks) {
+        // Пропускаем размер который не нужно заполнять
+        if (!shouldFill(label)) {
+          console.log(`[PVZ-Bags v${VERSION}] ${label}: пропущен (sizes=${bagsSizes})`);
+          continue;
+        }
+
+        const current = parseInt(input.value, 10) || 0;
+
+        // Уже заполнено до этого уровня — пропускаем
+        if (filled[label] >= available && current >= available) continue;
+
+        const clicks = Math.min(available - current, quotaLeft(label, pending));
+        if (clicks <= 0) { filled[label] = available; continue; }
+
+        console.log(`[PVZ-Bags v${VERSION}] ${label}: заполняем ${current} → ${current + clicks} из ${available} (+${clicks} кликов)`);
+        filled[label] = available;
+
+        for (let i = 0; i < clicks; i++) {
+          if (i > 0) await sleep(150);
+          // Перед каждым кликом — актуальное состояние: страница, input, лимит
+          if (!enabled || !plusBtn.isConnected || plusBtn.disabled) break;
+          if ((parseInt(input.value, 10) || 0) >= available) break;
+          if (quotaLeft(label, pending) <= 0) break;
+          plusBtn.click();
+          pending[label]++;
+        }
       }
-
-      const current = parseInt(input.value, 10) || 0;
-
-      // Уже заполнено до этого уровня — пропускаем
-      if (filled[label] >= available && current >= available) continue;
-
-      const clicks = available - current;
-      if (clicks <= 0) { filled[label] = available; continue; }
-
-      console.log(`[PVZ-Bags v${VERSION}] ${label}: заполняем ${current} → ${available} (+${clicks} кликов)`);
-      filled[label] = available;
-
-      for (let i = 0; i < clicks; i++) {
-        setTimeout(() => {
-          if (!plusBtn.disabled) {
-            plusBtn.click();
-            sessionStats[label] = (sessionStats[label] || 0) + 1;
-            saveStats();
-            // После последнего клика проверяем — достигнуты ли все лимиты
-            if (i === clicks - 1 && checkAllLimitsDone()) {
-              console.log(`[PVZ-Bags v${VERSION}] Все лимиты достигнуты — авто-пакеты остановлены`);
-              stopObserving();
-            }
-          }
-        }, i * 150);
+    } finally {
+      if (pending.M || pending.L) {
+        try { await addStats(pending); }
+        catch (e) { console.log(`[PVZ-Bags v${VERSION}] не удалось сохранить статистику: ${e?.message || e}`); }
       }
+      inFlight = false;
+    }
+
+    if (checkAllLimitsDone()) {
+      console.log(`[PVZ-Bags v${VERSION}] Все лимиты достигнуты — авто-пакеты остановлены`);
+      stopObserving();
+    } else if (rerun) {
+      scheduleFill(200);
     }
   }
 

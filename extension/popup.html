@@ -461,6 +461,7 @@
             <div style="flex:1"><label>Логин <span style="opacity:.5">(необяз.)</span></label><input type="text" id="proxyUsername" placeholder="user" autocomplete="off" /></div>
             <div style="flex:1"><label>Пароль <span style="opacity:.5">(необяз.)</span></label><input type="password" id="proxyPassword" placeholder="••••••" autocomplete="off" /></div>
           </div>
+          <div style="font-size:10px;color:var(--text-mute);line-height:1.35">Логин/пароль — только для HTTP: Chrome не поддерживает SOCKS5 с авторизацией. MTProto-прокси не подходят. Пока прокси включён, системный прокси/VPN-расширение для остальных сайтов не действуют.</div>
           <div style="display:flex;gap:8px;align-items:center">
             <button class="btn-test-tg" id="btnTestProxy">🔌 Тест прокси</button>
             <div class="tg-status" id="proxyStatus"></div>
