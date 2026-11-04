@@ -7,17 +7,13 @@
     "notifications",
     "alarms",
     "storage",
-    "activeTab",
     "scripting",
-    "tabs",
     "proxy",
     "webRequest",
     "webRequestAuthProvider"
   ],
   "host_permissions": [
     "*://turbo-pvz.ozon.ru/*",
-    "*://*.ozon.ru/*",
-    "*://*.ozon.com/*",
     "*://api.telegram.org/*",
     "*://ntfy.sh/*"
   ],

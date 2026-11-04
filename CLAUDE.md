@@ -54,7 +54,8 @@ docs/                 architecture.md, known-issues.md, backend-idea.md, fixture
 4. **HTTP-заголовки только ISO-8859-1.** Кириллицу и эмодзи в заголовки не класть. ntfy отправляется JSON-API
    (`POST <server>` с телом `{topic, message, title, …}`) — не возвращай заголовки `Title`/`Tags`.
 5. **Новое сообщение** между частями расширения = ветка в `onMessage` в `background.js` + отправитель; типы пиши
-   ЗАГЛАВНЫМИ_С_ПОДЧЁРКИВАНИЕМ. Новая настройка = дефолт в `background.js` (`DEFAULT_SETTINGS`) **и** в `popup.js` (`settings`).
+   ЗАГЛАВНЫМИ_С_ПОДЧЁРКИВАНИЕМ. Сообщение от content-скрипта ещё добавь в `CONTENT_MSG_TYPES` (иначе `forbidden`).
+   Тесты каналов не меняют общий `settings` — передавай данные параметром. Новая настройка = дефолт в `background.js` (`DEFAULT_SETTINGS`) **и** в `popup.js` (`settings`).
 6. **Content-скрипты** перед любым `chrome.*` проверяют `chrome.runtime?.id` (расширение могло перезагрузиться).
 7. **Секреты** (токен Telegram-бота, токен/топик ntfy, логин/пароль прокси) живут только в `chrome.storage.local` и в
    интерфейсе. Не клади их в репозиторий, фикстуры, логи, сообщения коммитов. Перед сохранением логов консоли или HTML с

@@ -63,7 +63,8 @@
 | type | откуда → куда | payload | ответ |
 |---|---|---|---|
 | `TIMER_FOUND` | content → bg | `{seconds, url, title, debugInfo}` | `{ok}` |
-| `TIMER_LOST` | content / popup → bg | — | `{ok}` |
+| `TIMER_LOST` | content → bg | — (таймер пропал; приёмка завершится через 2 мин) | `{ok}` |
+| `TIMER_CLEAR` | popup → bg | — (кнопка «Сбросить»: завершить приёмку сразу) | `{ok}` |
 | `TIMER_MANUAL` | popup → bg | `{seconds}` | `{ok}` |
 | `GET_STATE` | popup → bg | — | `{timerState, settings, modeState}` |
 | `GET_LOG` | popup → bg | — | `{log: [{text, type}]}` |
@@ -79,6 +80,9 @@
 | `GET_TIMER_STATUS`, `SET_DEBUG_MODE` | (никто не шлёт) → content.js | — / `{enabled}` | заготовки, см. `known-issues.md` |
 
 Новое сообщение = ветка в `background.js` (`chrome.runtime.onMessage`, цепочка `if / else if`) **и** отправитель.
+Отправителя проверяет `isAllowedSender()`: от вкладок Ozon принимаются только `CONTENT_MSG_TYPES`
+(`TIMER_FOUND`, `TIMER_LOST`), всё остальное — только со страниц расширения (popup). Новое сообщение от content-скрипта
+нужно добавить в `CONTENT_MSG_TYPES`, иначе оно получит `{ok:false, reason:'forbidden'}`.
 `npm run check` ругается, если тип отправляется, но не обрабатывается, или обрабатывается в двух ветках.
 
 ## `chrome.storage.local`

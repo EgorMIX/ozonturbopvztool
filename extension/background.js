@@ -180,9 +180,14 @@ function buildPacScript(px, host, port) {
 }`;
 }
 
+// На время «Тест прокси» — проверяемые поля из popup; рабочие settings.proxy не меняются,
+// поэтому «Сохранить» во время теста не откатывается его окончанием.
+let proxyTestOverride = null;
+const activeProxy = () => proxyTestOverride || settings.proxy;
+
 // Возвращает { ok, reason? }
 async function applyProxy() {
-  const px = settings.proxy;
+  const px = activeProxy();
   if (!px?.enabled) { await clearProxy(); return { ok: true }; }
   const v = validateProxy(px);
   if (!v.ok) { bgLog(`Прокси не применён: ${v.reason}`, 'err'); await clearProxy(); return v; }
@@ -215,7 +220,7 @@ const proxyAuthTried = new Set(); // requestId, на которые уже от�
 function handleProxyAuth(details, callback) {
   if (!details.isProxy) { callback({}); return; }
   ready.then(() => {
-    const px = settings.proxy;
+    const px = activeProxy();
     const ch = details.challenger || {};
     const ours = px?.enabled && px.type === 'http' && px.username &&
       String(ch.host || '').toLowerCase() === String(px.host || '').trim().toLowerCase() && Number(ch.port) === Number(px.port);
@@ -247,15 +252,17 @@ async function clearProxy() {
 
 // ─── Telegram ─────────────────────────────────────────────────────────────
 
-async function sendTelegram(text, isTest = false) {
-  const tg = settings.telegram;
-  if (!tg.enabled && !isTest) return { ok: false, reason: 'disabled' };
-  if (!tg.botToken || !tg.chatId) return { ok: false, reason: 'no_credentials' };
+// tgCfg — данные для теста из popup; рабочие settings при этом не меняются.
+// Без parse_mode: текст порога редактирует пользователь, и `_ * [ \`` в Markdown дали бы 400 и потерю уведомления.
+async function sendTelegram(text, isTest = false, tgCfg = null) {
+  const tg = tgCfg || settings.telegram;
+  if (!tg?.enabled && !isTest) return { ok: false, reason: 'disabled' };
+  if (!tg?.botToken || !tg?.chatId) return { ok: false, reason: 'no_credentials' };
   try {
     const resp = await fetch(`https://api.telegram.org/bot${tg.botToken}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: tg.chatId, text: `📦 *Ozon Turbo-PVZ*\n${text}`, parse_mode: 'Markdown' }),
+      body: JSON.stringify({ chat_id: tg.chatId, text: `📦 Ozon Turbo-PVZ\n${text}` }),
     });
     const data = await resp.json();
     if (data.ok) { bgLog(`Telegram: отправлено${isTest ? ' (тест)' : ''}`, isTest ? 'info' : 'warn'); return { ok: true }; }
@@ -266,13 +273,25 @@ async function sendTelegram(text, isTest = false) {
 
 // ─── ntfy.sh ──────────────────────────────────────────────────────────────
 
-async function sendNtfy(text, title = 'Ozon Turbo-PVZ', isTest = false) {
-  const n = settings.ntfy;
+// Адрес сервера ntfy: только https (иначе токен уйдёт открытым текстом). Возвращает { ok, url?, reason? }
+function checkNtfyServer(raw) {
+  const s = String(raw || 'https://ntfy.sh').trim().replace(/\/+$/, '');
+  let u;
+  try { u = new URL(s); } catch (_) { return { ok: false, reason: `некорректный адрес сервера «${s}» — нужен вид https://ntfy.example.com` }; }
+  if (u.protocol !== 'https:') return { ok: false, reason: 'сервер ntfy должен быть https:// — по http токен и текст уйдут открытым текстом' };
+  return { ok: true, url: s };
+}
+
+// nCfg — данные для теста из popup; рабочие settings при этом не меняются
+async function sendNtfy(text, title = 'Ozon Turbo-PVZ', isTest = false, nCfg = null) {
+  const n = nCfg || settings.ntfy;
   if (!n?.enabled && !isTest) return { ok: false, reason: 'disabled' };
   if (!n?.topic) return { ok: false, reason: 'no_topic' };
 
   const PRIO = { min: 1, low: 2, default: 3, high: 4, urgent: 5 };
-  const server  = (n.server || 'https://ntfy.sh').replace(/\/$/, '');
+  const srv  = checkNtfyServer(n.server);
+  if (!srv.ok) { bgLog(`ntfy: ${srv.reason}`, 'err'); return { ok: false, reason: srv.reason }; }
+  const server = srv.url;
 
   // Используем JSON API ntfy — поддерживает UTF-8 в title без кодирования
   const headers = { 'Content-Type': 'application/json' };
@@ -311,7 +330,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const current = remainingSeconds();
     if (current != null) {
       updateBadge(current);
-      if (getMode() === 'active') checkThresholds(current);
+      checkThresholds(current); // в паузе fireThreshold только помечает порог отработанным
     } else {
       if (getMode() !== 'disabled') updateBadge(null);
     }
@@ -352,10 +371,16 @@ function checkThresholds(currentSeconds) {
 }
 
 function fireThreshold(minutes, currentSeconds) {
-  if (getMode() !== 'active') { bgLog(`Порог ${minutes} мин пропущен (${modeState.mode})`, 'info'); return; }
   const threshold = settings.thresholds.find(t => t.minutes === minutes);
   if (!threshold?.enabled) return;
   if (timerState.firedFor.includes(minutes)) return;
+  if (getMode() !== 'active') {
+    // Пропущенный в паузе порог помечаем отработанным — после снятия паузы устаревшее оповещение не придёт
+    timerState.firedFor.push(minutes);
+    chrome.storage.local.set({ timerState });
+    bgLog(`Порог ${minutes} мин пропущен (${modeState.mode})`, 'info');
+    return;
+  }
 
   timerState.firedFor.push(minutes);
   chrome.storage.local.set({ timerState });
@@ -379,7 +404,7 @@ function fireThreshold(minutes, currentSeconds) {
 
 async function speakInTab(text, isTest = false, volume = 1.0) {
   if (!settings.speechEnabled && !isTest) return false;
-  const tabs = await chrome.tabs.query({ url: ['*://*.ozon.ru/*', '*://turbo-pvz.ozon.ru/*'] });
+  const tabs = await chrome.tabs.query({ url: ['*://turbo-pvz.ozon.ru/*'] }); // работает по host_permissions, без права «tabs»
   if (!tabs.length) { bgLog('Нет табов Ozon для голоса', 'warn'); return false; }
   const tab = tabs[0];
   try {
@@ -422,7 +447,7 @@ function notifyTimerStarted(seconds, isManual = false) {
     });
   }
   if (settings.speechEnabled)     speakInTab(`Приёмка обнаружена. До конца ${timeStr}.`, false, 0.6);
-  if (settings.telegram?.enabled) sendTelegram(`✅ Приёмка начата\n${message}\n_(${source})_`);
+  if (settings.telegram?.enabled) sendTelegram(`✅ Приёмка начата\n${message}\n(${source})`);
   if (settings.ntfy?.enabled)     sendNtfy(`✅ Приёмка начата. ${message}`, 'Ozon Turbo-PVZ — Старт');
 }
 
@@ -438,10 +463,24 @@ function sendTestNotification(thresholdMinutes) {
   bgLog(`[DEBUG] Тест push порога ${t.minutes} мин`, 'info');
 }
 
+// Открываем только страницы Turbo-PVZ (url приходит из content-скрипта и лежит в storage)
+const OZON_PAGE_RE = /^https:\/\/turbo-pvz\.ozon\.ru\//;
+function openTimerPage() {
+  chrome.tabs.create({ url: OZON_PAGE_RE.test(timerState.url || '') ? timerState.url : 'https://turbo-pvz.ozon.ru/' });
+}
+
 chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   if (!notifId.startsWith(NOTIFY_ID)) return;
   await ready; // нужен timerState.url из storage
-  if (btnIdx === 0 && timerState.url) chrome.tabs.create({ url: timerState.url });
+  if (btnIdx === 0) openTimerPage();
+  chrome.notifications.clear(notifId);
+});
+
+// Клик по самому уведомлению (не по кнопке) — тоже открыть страницу приёмки
+chrome.notifications.onClicked.addListener(async (notifId) => {
+  if (!notifId.startsWith(NOTIFY_ID) && notifId !== 'ozon_pvz_start') return;
+  await ready;
+  openTimerPage();
   chrome.notifications.clear(notifId);
 });
 
@@ -449,7 +488,22 @@ chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
 
 // Сначала дожидаемся загрузки состояния, потом обрабатываем. Ответ из-за этого всегда асинхронный,
 // поэтому слушатель всегда возвращает true (канал открыт до sendResponse).
+// Кто что может слать: content-скрипты (вкладка Ozon) — только данные таймера; всё остальное — только
+// страницы самого расширения (popup). Страница Ozon до runtime не дотянется (нет externally_connectable),
+// это защита на случай ошибки в content-скрипте.
+const CONTENT_MSG_TYPES = new Set(['TIMER_FOUND', 'TIMER_LOST']);
+function isAllowedSender(msg, sender) {
+  if (sender.id !== chrome.runtime.id) return false;
+  if (!sender.tab) return String(sender.url || '').startsWith(chrome.runtime.getURL(''));
+  return CONTENT_MSG_TYPES.has(msg?.type) && OZON_PAGE_RE.test(sender.url || '');
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!isAllowedSender(msg, sender)) {
+    bgLog(`Отклонено сообщение ${String(msg?.type).slice(0, 40)} от ${sender.tab ? 'вкладки' : 'неизвестного отправителя'}`, 'err');
+    sendResponse({ ok: false, reason: 'forbidden' });
+    return false;
+  }
   ready.then(() => handleMessage(msg, sender, sendResponse));
   return true;
 });
@@ -458,6 +512,7 @@ function handleMessage(msg, _sender, sendResponse) {
 
   if (msg.type === 'TIMER_FOUND') {
     if (getMode() === 'disabled') { sendResponse({ ok: true }); return true; }
+    if (!Number.isFinite(msg.seconds) || msg.seconds < 0 || msg.seconds > 86400) { sendResponse({ ok: false, reason: 'bad_seconds' }); return true; }
     const now        = Date.now();
     const endsAt     = now + msg.seconds * 1000;
     const prevEndsAt = timerState.seconds != null ? sessionEndsAt() : null;
@@ -514,6 +569,12 @@ function handleMessage(msg, _sender, sendResponse) {
     sendResponse({ ok: true });
   }
 
+  else if (msg.type === 'TIMER_CLEAR') {
+    // Кнопка «Сбросить» в popup — завершить приёмку сразу, без ожидания LOST_GRACE_MIN
+    if (timerState.seconds != null) endSession('сброшено вручную');
+    sendResponse({ ok: true });
+  }
+
   else if (msg.type === 'GET_STATE') { sendResponse({ timerState, settings, modeState }); }
   else if (msg.type === 'GET_LOG')   { sendResponse({ log: [...eventLog] }); }
 
@@ -555,28 +616,23 @@ function handleMessage(msg, _sender, sendResponse) {
     return true;
   }
 
+  // Тесты не трогают рабочие settings: данные из полей popup передаются параметром
   else if (msg.type === 'DEBUG_TEST_TELEGRAM') {
-    const savedTg = settings.telegram;
-    if (msg.botToken && msg.chatId) settings.telegram = { enabled: true, botToken: msg.botToken, chatId: msg.chatId };
-    sendTelegram(msg.text || '🧪 Тест-сообщение от Ozon Turbo-PVZ.', true)
-      .then(result => {
-        if (msg.botToken && msg.chatId) settings.telegram = { ...savedTg, botToken: msg.botToken, chatId: msg.chatId };
-        sendResponse(result);
-      });
+    const tgCfg = msg.botToken && msg.chatId ? { enabled: true, botToken: msg.botToken, chatId: msg.chatId } : null;
+    sendTelegram(msg.text || '🧪 Тест-сообщение от Ozon Turbo-PVZ.', true, tgCfg).then(sendResponse);
     return true;
   }
 
   else if (msg.type === 'DEBUG_TEST_NTFY') {
-    const saved = settings.ntfy;
-    if (msg.ntfy) settings.ntfy = { ...settings.ntfy, ...msg.ntfy, enabled: true };
-    sendNtfy(msg.text || '🧪 Тест ntfy от Ozon Turbo-PVZ. Всё работает!', 'Ozon Turbo-PVZ — Тест', true)
-      .then(result => { settings.ntfy = saved; sendResponse(result); });
+    const nCfg = msg.ntfy ? { ...settings.ntfy, ...msg.ntfy, enabled: true } : null;
+    sendNtfy(msg.text || '🧪 Тест ntfy от Ozon Turbo-PVZ. Всё работает!', 'Ozon Turbo-PVZ — Тест', true, nCfg)
+      .then(sendResponse);
     return true;
   }
 
   else if (msg.type === 'DEBUG_TEST_PROXY') {
-    const savedProxy = settings.proxy;
-    settings.proxy = { ...msg.proxy, enabled: true };
+    if (proxyTestOverride) { sendResponse({ ok: false, reason: 'тест прокси уже идёт — дождитесь результата' }); return true; }
+    proxyTestOverride = { ...msg.proxy, enabled: true };
     (async () => {
       try {
         const applied = await applyProxy();
@@ -597,7 +653,7 @@ function handleMessage(msg, _sender, sendResponse) {
         bgLog(`Прокси тест: ${reason}`, 'err');
         sendResponse({ ok: false, reason });
       } finally {
-        settings.proxy = savedProxy;
+        proxyTestOverride = null;
         await applyProxy();
       }
     })();
