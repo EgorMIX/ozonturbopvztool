@@ -18,7 +18,7 @@
 
 | Файл | Роль |
 |---|---|
-| `manifest.json` | MV3, 1.5.0, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
+| `manifest.json` | MV3, 1.5.1, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
 | `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси (PAC только для `api.telegram.org`, логин HTTP-прокси через `webRequest.onAuthRequired`), режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
 | `content.js` | Находит таймер на странице приёмки (`/receiving…`), раз в 10 с шлёт секунды в SW. Следит за SPA-навигацией. |
 | `speech.js` | Слушает `SPEAK`, говорит через `speechSynthesis` (ru-RU, rate 0.95). Если скрипта во вкладке нет — SW подставляет ту же функцию через `scripting.executeScript`. |
