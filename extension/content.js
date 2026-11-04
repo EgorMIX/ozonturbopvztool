@@ -5,12 +5,9 @@
   // ─── Whitelist URL-паттернов: только страницы приёмки ─────────────────────
   // Плагин работает ТОЛЬКО если текущий URL соответствует одному из паттернов.
   // Если нужно добавить URL — допишите в массив.
+  // (манифест и так подключает скрипт только на turbo-pvz.ozon.ru)
   const URL_WHITELIST = [
-    // Основная страница приёмки Turbo-PVZ
     /turbo-pvz\.ozon\.ru\/receiving/,
-    // Запасной вариант — seller с приёмкой (на случай редиректов)
-    /seller\.ozon\.ru.*receiving/i,
-    /seller\.ozon\.ru.*acceptance/i,
   ];
 
   function isAllowedPage() {
@@ -21,9 +18,7 @@
   // ─── Состояние ────────────────────────────────────────────────────────────
 
   let lastFoundTimer  = null;
-  let lastFoundEl     = null;   // для дебаг-подсветки
   let scanInterval    = null;
-  let debugMode       = false;
 
   // ─── Парсинг времени ──────────────────────────────────────────────────────
 
@@ -168,30 +163,6 @@
     return null;
   }
 
-  // ─── Дебаг-подсветка ──────────────────────────────────────────────────────
-
-  function highlightElement(el) {
-    if (!debugMode) return;
-    // Снимаем предыдущую подсветку
-    if (lastFoundEl && lastFoundEl !== el) {
-      lastFoundEl.style.removeProperty('outline');
-      lastFoundEl.style.removeProperty('background');
-    }
-    if (el) {
-      el.style.outline   = '2px solid #ff5722';
-      el.style.background = 'rgba(255,87,34,0.15)';
-      lastFoundEl = el;
-    }
-  }
-
-  function removeHighlight() {
-    if (lastFoundEl) {
-      lastFoundEl.style.removeProperty('outline');
-      lastFoundEl.style.removeProperty('background');
-      lastFoundEl = null;
-    }
-  }
-
   // ─── Отправка в background ────────────────────────────────────────────────
 
   function sendTimerToBackground(seconds, debugInfo) {
@@ -223,7 +194,6 @@
       // Страница не в whitelist — молча игнорируем
       if (lastFoundTimer !== null) {
         lastFoundTimer = null;
-        removeHighlight();
         if (chrome.runtime?.id) chrome.runtime.sendMessage({ type: 'TIMER_LOST' }).catch(() => {});
       }
       return;
@@ -233,7 +203,6 @@
 
     if (result) {
       const { seconds, element, matchedBy, text } = result;
-      highlightElement(element);
 
       if (lastFoundTimer === null || Math.abs(lastFoundTimer - seconds) > 5) {
         lastFoundTimer = seconds;
@@ -241,7 +210,6 @@
         sendTimerToBackground(seconds, info);
       }
     } else {
-      removeHighlight();
       if (lastFoundTimer !== null) {
         lastFoundTimer = null;
         if (chrome.runtime?.id) chrome.runtime.sendMessage({ type: 'TIMER_LOST' }).catch(() => {});
@@ -276,7 +244,6 @@
     if (location.href !== lastHref) {
       lastHref = location.href;
       lastFoundTimer = null;
-      removeHighlight();
       // Сбрасываем старый интервал чтобы не накапливать при каждом переходе
       if (scanInterval) {
         clearInterval(scanInterval);
@@ -289,21 +256,8 @@
     }
   }).observe(document.body, { childList: true, subtree: true });
 
-  // Сообщения от popup/background
+  // Сообщения от popup (кнопка «Инфо о странице» в отладке)
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg.type === 'GET_TIMER_STATUS') {
-      if (!isAllowedPage()) { sendResponse({ seconds: null, reason: 'page_not_whitelisted', url: location.href }); return; }
-      const result = findTimerElement();
-      sendResponse(result
-        ? { seconds: result.seconds, text: result.text, matchedBy: result.matchedBy }
-        : { seconds: null }
-      );
-    }
-    if (msg.type === 'SET_DEBUG_MODE') {
-      debugMode = msg.enabled;
-      if (!debugMode) removeHighlight();
-      sendResponse({ ok: true });
-    }
     if (msg.type === 'GET_PAGE_INFO') {
       sendResponse({
         url:         location.href,

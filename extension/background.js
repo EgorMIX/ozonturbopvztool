@@ -494,8 +494,9 @@ chrome.notifications.onClicked.addListener(async (notifId) => {
 const CONTENT_MSG_TYPES = new Set(['TIMER_FOUND', 'TIMER_LOST']);
 function isAllowedSender(msg, sender) {
   if (sender.id !== chrome.runtime.id) return false;
-  if (!sender.tab) return String(sender.url || '').startsWith(chrome.runtime.getURL(''));
-  return CONTENT_MSG_TYPES.has(msg?.type) && OZON_PAGE_RE.test(sender.url || '');
+  // Страница расширения (popup — и всплывающим окном, и открытая во вкладке) — по адресу, а не по sender.tab
+  if (String(sender.url || '').startsWith(chrome.runtime.getURL(''))) return true;
+  return Boolean(sender.tab) && CONTENT_MSG_TYPES.has(msg?.type) && OZON_PAGE_RE.test(sender.url || '');
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
