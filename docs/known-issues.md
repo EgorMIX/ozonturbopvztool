@@ -11,7 +11,11 @@
 
 ## P0 — надёжность уведомлений
 
-### 1. Service worker не дожидается загрузки состояния
+### 1. Service worker не дожидается загрузки состояния — ИСПРАВЛЕНО (ждёт проверки в Chrome)
+- **Что сделано:** загрузка из storage — промис `ready` (`applyLoadedState`, низ `background.js`); `onAlarm` и
+  `onButtonClicked` начинаются с `await ready`, `onMessage` → `ready.then(() => handleMessage(...))`, `return true`.
+  Журнал `eventLog` по-прежнему только в памяти SW (после перезапуска SW он пуст — это ожидаемо).
+- Ниже — исходное описание проблемы.
 - **Где:** `background.js` — `chrome.storage.local.get([...])` внизу файла (≈521–548) заполняет `timerState`, `settings`,
   `modeState` **асинхронно**, а обработчики `chrome.alarms.onAlarm` (≈198) и `chrome.runtime.onMessage` (≈344)
   регистрируются сразу и срабатывают при пробуждении SW, не дожидаясь этой загрузки.

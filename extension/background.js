@@ -195,7 +195,8 @@ async function sendNtfy(text, title = 'Ozon Turbo-PVZ', isTest = false) {
 
 chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 10 / 60 });
 
-chrome.alarms.onAlarm.addListener((alarm) => {
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  await ready;
   if (alarm.name === PAUSE_ALARM) { bgLog('Пауза завершена', 'ok'); setMode('active'); return; }
   if (alarm.name === BADGE_ALARM) {
     if (getMode() === 'disabled') return;
@@ -333,15 +334,23 @@ function sendTestNotification(thresholdMinutes) {
   bgLog(`[DEBUG] Тест push порога ${t.minutes} мин`, 'info');
 }
 
-chrome.notifications.onButtonClicked.addListener((notifId, btnIdx) => {
+chrome.notifications.onButtonClicked.addListener(async (notifId, btnIdx) => {
   if (!notifId.startsWith(NOTIFY_ID)) return;
+  await ready; // нужен timerState.url из storage
   if (btnIdx === 0 && timerState.url) chrome.tabs.create({ url: timerState.url });
   chrome.notifications.clear(notifId);
 });
 
 // ─── Сообщения ────────────────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+// Сначала дожидаемся загрузки состояния, потом обрабатываем. Ответ из-за этого всегда асинхронный,
+// поэтому слушатель всегда возвращает true (канал открыт до sendResponse).
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  ready.then(() => handleMessage(msg, sender, sendResponse));
+  return true;
+});
+
+function handleMessage(msg, _sender, sendResponse) {
 
   if (msg.type === 'TIMER_FOUND') {
     if (getMode() === 'disabled') { sendResponse({ ok: true }); return true; }
@@ -512,13 +521,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     bgLog('[DEBUG] Полный сброс', 'warn');
     sendResponse({ ok: true });
   }
-
-  return true;
-});
+}
 
 // ─── Старт ────────────────────────────────────────────────────────────────
 
-chrome.storage.local.get(['timerState', 'pvzSettings', 'modeState'], (data) => {
+// SW эфемерный: при каждом пробуждении (аларм, сообщение) переменные выше — дефолтные.
+// Все обработчики событий сначала делают `await ready`, чтобы работать с состоянием из storage,
+// а не с дефолтами (иначе аларм порога видит seconds === null и уведомление теряется).
+// Промис никогда не отклоняется: при ошибке чтения работаем с дефолтами.
+const ready = chrome.storage.local.get(['timerState', 'pvzSettings', 'modeState'])
+  .then(applyLoadedState)
+  .catch((e) => bgLog(`Ошибка загрузки состояния: ${e?.message || e}`, 'err'));
+
+function applyLoadedState(data) {
   if (data.pvzSettings) {
     settings = {
       ...DEFAULT_SETTINGS,
@@ -545,4 +560,4 @@ chrome.storage.local.get(['timerState', 'pvzSettings', 'modeState'], (data) => {
     const elapsed = (Date.now() - (timerState.updatedAt || Date.now())) / 1000;
     updateBadge(Math.max(timerState.seconds - elapsed, 0));
   }
-});
+}
