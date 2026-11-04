@@ -477,17 +477,6 @@ document.getElementById('btnTestProxy').addEventListener('click', () => {
 
 // ─── Авто-пакеты UI ──────────────────────────────────────────────────────
 
-document.getElementById('bagsEnabled').addEventListener('change', () => {
-  settings.bagsEnabled = document.getElementById('bagsEnabled').checked;
-  chrome.storage.local.set({ pvzSettings: settings }, () => {
-    const status = document.getElementById('bagsStatus');
-    status.textContent = settings.bagsEnabled
-      ? '✅ Авто-пакеты включены — пакеты будут заполняться автоматически'
-      : '⏸ Авто-пакеты отключены';
-    setTimeout(() => { status.textContent = ''; }, 3000);
-  });
-});
-
 // ─── Вкладки ──────────────────────────────────────────────────────────────
 
 document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -521,8 +510,8 @@ document.getElementById('bagsEnabled').addEventListener('change', () => {
 document.getElementById('saveBagsBtn').addEventListener('click', () => {
   settings.bagsEnabled = document.getElementById('bagsEnabled').checked;
   settings.bagsSizes   = document.querySelector('.bags-size-btn.selected')?.dataset.size || 'both';
+  // SETTINGS_UPDATED не шлём: таймеру эти настройки не нужны, bags-content.js сам ловит storage.onChanged
   chrome.storage.local.set({ pvzSettings: settings }, () => {
-    chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings });
     const btn = document.getElementById('saveBagsBtn');
     btn.textContent = '✅ Сохранено!'; btn.classList.add('saved');
     setTimeout(() => { btn.textContent = '💾 Сохранить'; btn.classList.remove('saved'); }, 1500);
@@ -557,8 +546,8 @@ document.getElementById('bagsLimitL').addEventListener('input', updateLimitHints
 
 document.getElementById('saveBagsLimitBtn').addEventListener('click', () => {
   settings.bagsQuota = readBagsQuota();
+  // SETTINGS_UPDATED не шлём — см. saveBagsBtn
   chrome.storage.local.set({ pvzSettings: settings }, () => {
-    chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings });
     const status = document.getElementById('bagsLimitStatus');
     const m = settings.bagsQuota.M, l = settings.bagsQuota.L;
     status.textContent = m === 0 && l === 0

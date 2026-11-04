@@ -38,15 +38,53 @@ function bgLog(text, type = 'info') {
 
 // ─── Состояние таймера ────────────────────────────────────────────────────
 
+// Сессия приёмки определяется абсолютным временем окончания endsAt (мс).
+// seconds/updatedAt оставлены для popup: seconds — остаток на момент updatedAt.
 let timerState = {
   seconds:       null,
   updatedAt:     null,
+  endsAt:        null,
+  lostAt:        null,  // когда таймер пропал со страницы (null — виден)
   url:           '',
   title:         '',
   firedFor:      [],
   isManual:      false,
   startNotified: false,
 };
+
+const LOST_GRACE_ALARM     = 'timer_lost_grace';
+const LOST_GRACE_MIN       = 2;          // сколько минут таймер может не быть виден, прежде чем приёмка считается оконченной
+const SESSION_TOLERANCE_MS = 90 * 1000;  // расхождение endsAt в пределах одной приёмки
+
+function sessionEndsAt() {
+  if (timerState.endsAt != null) return timerState.endsAt;
+  // состояние, сохранённое до появления endsAt
+  if (timerState.seconds != null && timerState.updatedAt != null) return timerState.updatedAt + timerState.seconds * 1000;
+  return null;
+}
+
+// Остаток текущей приёмки в секундах или null, если приёмки нет
+function remainingSeconds() {
+  if (timerState.seconds == null) return null;
+  const endsAt = sessionEndsAt();
+  if (endsAt == null) return null;
+  return Math.max(Math.round((endsAt - Date.now()) / 1000), 0);
+}
+
+function clearThresholdAlarms() {
+  return chrome.alarms.getAll().then(alarms =>
+    Promise.all(alarms.filter(a => a.name.startsWith('threshold_')).map(a => chrome.alarms.clear(a.name)))
+  );
+}
+
+function endSession(reason) {
+  timerState = { ...timerState, seconds: null, updatedAt: null, endsAt: null, lostAt: null, firedFor: [], startNotified: false };
+  chrome.storage.local.set({ timerState });
+  chrome.alarms.clear(LOST_GRACE_ALARM);
+  clearThresholdAlarms();
+  if (getMode() !== 'disabled') updateBadge(null);
+  bgLog(`Приёмка завершена: ${reason}`, 'info');
+}
 
 // ─── Режим работы ─────────────────────────────────────────────────────────
 
@@ -71,17 +109,14 @@ function setMode(mode, pauseMinutes = 0) {
   } else if (mode === 'disabled') {
     chrome.action.setBadgeText({ text: 'OFF' });
     chrome.action.setBadgeBackgroundColor({ color: '#555' });
-    chrome.alarms.getAll().then(alarms =>
-      alarms.filter(a => a.name.startsWith('threshold_')).forEach(a => chrome.alarms.clear(a.name))
-    );
+    clearThresholdAlarms();
     bgLog('Плагин отключён', 'warn');
   } else if (mode === 'active') {
     bgLog('Мониторинг активен', 'ok');
-    if (timerState.seconds != null && timerState.updatedAt != null) {
-      const elapsed = (Date.now() - timerState.updatedAt) / 1000;
-      const current = Math.max(Math.round(timerState.seconds - elapsed), 0);
+    const current = remainingSeconds();
+    if (current != null) {
       updateBadge(current);
-      timerState.firedFor = [];
+      // firedFor не сбрасываем: уже отправленные пороги не повторяются
       scheduleThresholdAlarms(current);
     }
   }
@@ -120,10 +155,7 @@ function updateBadge(seconds) {
 
 async function applyProxy() {
   const px = settings.proxy;
-  if (!px?.enabled || !px.host || !px.port) {
-    try { await chrome.proxy.settings.set({ value: { mode: 'direct' }, scope: 'regular' }); } catch (_) {}
-    return;
-  }
+  if (!px?.enabled || !px.host || !px.port) { await clearProxy(); return; }
   const scheme = px.type === 'http' ? 'http' : 'socks5';
   try {
     await chrome.proxy.settings.set({
@@ -137,8 +169,15 @@ async function applyProxy() {
   } catch (e) { bgLog(`Прокси error: ${e.message}`, 'err'); }
 }
 
+// Снимаем только СВОЮ настройку прокси. Раньше здесь ставился mode: 'direct', и это перетирало
+// системный прокси / VPN-расширения пользователя; clear() возвращает их, если 'direct' остался от старой версии.
 async function clearProxy() {
-  try { await chrome.proxy.settings.set({ value: { mode: 'direct' }, scope: 'regular' }); } catch (_) {}
+  try {
+    const cur = await chrome.proxy.settings.get({ incognito: false });
+    if (cur.levelOfControl !== 'controlled_by_this_extension') return;
+    await chrome.proxy.settings.clear({ scope: 'regular' });
+    bgLog('Прокси расширения снят', 'info');
+  } catch (e) { bgLog(`Прокси clear error: ${e.message}`, 'err'); }
 }
 
 // ─── Telegram ─────────────────────────────────────────────────────────────
@@ -198,11 +237,14 @@ chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 10 / 60 });
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   await ready;
   if (alarm.name === PAUSE_ALARM) { bgLog('Пауза завершена', 'ok'); setMode('active'); return; }
+  if (alarm.name === LOST_GRACE_ALARM) {
+    if (timerState.lostAt != null) endSession(`таймер не виден на странице ${LOST_GRACE_MIN} мин`);
+    return;
+  }
   if (alarm.name === BADGE_ALARM) {
     if (getMode() === 'disabled') return;
-    if (timerState.seconds != null && timerState.updatedAt != null) {
-      const elapsed = (Date.now() - timerState.updatedAt) / 1000;
-      const current = Math.max(Math.round(timerState.seconds - elapsed), 0);
+    const current = remainingSeconds();
+    if (current != null) {
       updateBadge(current);
       if (getMode() === 'active') checkThresholds(current);
     } else {
@@ -213,11 +255,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name.startsWith('threshold_')) {
     const mins = parseInt(alarm.name.split('_')[1]);
     bgLog(`Аларм порога ${mins} мин`, 'warn');
-    if (timerState.seconds != null && timerState.updatedAt != null) {
-      const elapsed = (Date.now() - timerState.updatedAt) / 1000;
-      const current = Math.max(Math.round(timerState.seconds - elapsed), 0);
-      fireThreshold(mins, current);
-    }
+    const current = remainingSeconds();
+    if (current != null) fireThreshold(mins, current);
   }
 });
 
@@ -354,21 +393,27 @@ function handleMessage(msg, _sender, sendResponse) {
 
   if (msg.type === 'TIMER_FOUND') {
     if (getMode() === 'disabled') { sendResponse({ ok: true }); return true; }
-    const prev         = timerState.seconds;
-    const isReallyNew  = prev === null;
-    const isNewSession = prev !== null && (msg.seconds - prev) > 60;
-    const isNew        = isReallyNew || isNewSession;
-    const firedFor     = isNew ? [] : timerState.firedFor;
-    const startNotified = isNewSession ? false : timerState.startNotified;
+    const now        = Date.now();
+    const endsAt     = now + msg.seconds * 1000;
+    const prevEndsAt = timerState.seconds != null ? sessionEndsAt() : null;
+    // Та же приёмка, если время окончания совпадает с точностью до SESSION_TOLERANCE_MS
+    // (в том числе после кратковременного исчезновения таймера при ререндере страницы)
+    const sameSession = prevEndsAt != null && Math.abs(endsAt - prevEndsAt) <= SESSION_TOLERANCE_MS;
 
-    timerState = { seconds: msg.seconds, updatedAt: Date.now(), url: msg.url, title: msg.title, firedFor, isManual: false, startNotified };
-    chrome.storage.local.set({ timerState });
-    updateBadge(msg.seconds);
-
-    if (isNew) {
-      bgLog(`Таймер ${isNewSession ? 'перезапущен' : 'обнаружен'}: ${fmt(msg.seconds)}${msg.debugInfo ? ` | ${msg.debugInfo}` : ''}`, 'ok');
+    if (sameSession) {
+      if (timerState.lostAt != null) {
+        chrome.alarms.clear(LOST_GRACE_ALARM);
+        bgLog('Таймер снова виден — та же приёмка', 'info');
+      }
+      timerState = { ...timerState, seconds: msg.seconds, updatedAt: now, endsAt, lostAt: null, url: msg.url, title: msg.title, isManual: false };
+    } else {
+      chrome.alarms.clear(LOST_GRACE_ALARM);
+      timerState = { seconds: msg.seconds, updatedAt: now, endsAt, lostAt: null, url: msg.url, title: msg.title, firedFor: [], isManual: false, startNotified: false };
+      bgLog(`Таймер ${prevEndsAt != null ? 'новой приёмки' : 'обнаружен'}: ${fmt(msg.seconds)}${msg.debugInfo ? ` | ${msg.debugInfo}` : ''}`, 'ok');
       scheduleThresholdAlarms(msg.seconds);
     }
+    chrome.storage.local.set({ timerState });
+    updateBadge(msg.seconds);
     if (!timerState.startNotified) {
       timerState.startNotified = true;
       chrome.storage.local.set({ timerState });
@@ -380,7 +425,8 @@ function handleMessage(msg, _sender, sendResponse) {
 
   else if (msg.type === 'TIMER_MANUAL') {
     bgLog(`Ручной таймер: ${fmt(msg.seconds)}`, 'ok');
-    timerState = { seconds: msg.seconds, updatedAt: Date.now(), url: timerState.url, title: 'Ручной', firedFor: [], isManual: true, startNotified: false };
+    chrome.alarms.clear(LOST_GRACE_ALARM);
+    timerState = { seconds: msg.seconds, updatedAt: Date.now(), endsAt: Date.now() + msg.seconds * 1000, lostAt: null, url: timerState.url, title: 'Ручной', firedFor: [], isManual: true, startNotified: false };
     chrome.storage.local.set({ timerState });
     updateBadge(msg.seconds);
     scheduleThresholdAlarms(msg.seconds);
@@ -389,14 +435,17 @@ function handleMessage(msg, _sender, sendResponse) {
   }
 
   else if (msg.type === 'TIMER_LOST') {
-    timerState.seconds  = null;
-    timerState.firedFor = [];
-    chrome.storage.local.set({ timerState });
-    updateBadge(null);
-    chrome.alarms.getAll().then(alarms =>
-      alarms.filter(a => a.name.startsWith('threshold_')).forEach(a => chrome.alarms.clear(a.name))
-    );
-    bgLog('Таймер сброшен', 'info');
+    // Не стираем приёмку сразу: таймер мог пропасть на секунду при ререндере страницы.
+    // Если за LOST_GRACE_MIN он не появится с тем же endsAt — аларм LOST_GRACE_ALARM завершит сессию.
+    const current = remainingSeconds();
+    if (current === 0) {
+      endSession('время вышло');
+    } else if (current != null && timerState.lostAt == null) {
+      timerState.lostAt = Date.now();
+      chrome.storage.local.set({ timerState });
+      chrome.alarms.create(LOST_GRACE_ALARM, { delayInMinutes: LOST_GRACE_MIN });
+      bgLog(`Таймер пропал со страницы — ждём ${LOST_GRACE_MIN} мин, пороги пока активны`, 'info');
+    }
     sendResponse({ ok: true });
   }
 
@@ -422,12 +471,9 @@ function handleMessage(msg, _sender, sendResponse) {
     }
     if (msg.settings.proxy !== undefined) applyProxy();
     bgLog('Настройки обновлены', 'info');
-    if (timerState.seconds != null) {
-      const elapsed = (Date.now() - timerState.updatedAt) / 1000;
-      const current = Math.max(Math.round(timerState.seconds - elapsed), 0);
-      timerState.firedFor = [];
-      scheduleThresholdAlarms(current);
-    }
+    // firedFor не сбрасываем: пересоздаём алармы только для ещё не сработавших порогов
+    const current = remainingSeconds();
+    if (current != null) scheduleThresholdAlarms(current);
     sendResponse({ ok: true });
   }
 
@@ -490,7 +536,8 @@ function handleMessage(msg, _sender, sendResponse) {
   else if (msg.type === 'DEBUG_SIM_TIMER') {
     const maxMins = Math.max(...settings.thresholds.filter(t => t.enabled).map(t => t.minutes), 30);
     const sec     = msg.seconds || maxMins * 60 + 70;
-    timerState = { seconds: sec, updatedAt: Date.now(), url: timerState.url || 'https://turbo-pvz.ozon.ru', title: 'Debug', firedFor: [], isManual: false, startNotified: false };
+    chrome.alarms.clear(LOST_GRACE_ALARM);
+    timerState = { seconds: sec, updatedAt: Date.now(), endsAt: Date.now() + sec * 1000, lostAt: null, url: timerState.url || 'https://turbo-pvz.ozon.ru', title: 'Debug', firedFor: [], isManual: false, startNotified: false };
     chrome.storage.local.set({ timerState });
     updateBadge(sec);
     scheduleThresholdAlarms(sec);
@@ -512,7 +559,7 @@ function handleMessage(msg, _sender, sendResponse) {
     chrome.alarms.getAll().then(async alarms => {
       for (const a of alarms) if (a.name !== BADGE_ALARM) await chrome.alarms.clear(a.name);
     });
-    timerState = { seconds: null, updatedAt: null, url: '', title: '', firedFor: [], isManual: false, startNotified: false };
+    timerState = { seconds: null, updatedAt: null, endsAt: null, lostAt: null, url: '', title: '', firedFor: [], isManual: false, startNotified: false };
     settings   = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
     modeState  = { mode: 'active', pauseUntil: null };
     chrome.storage.local.set({ modeState });
@@ -557,7 +604,6 @@ function applyLoadedState(data) {
     chrome.action.setBadgeText({ text: 'OFF' });
     chrome.action.setBadgeBackgroundColor({ color: '#555' });
   } else if (timerState.seconds != null) {
-    const elapsed = (Date.now() - (timerState.updatedAt || Date.now())) / 1000;
-    updateBadge(Math.max(timerState.seconds - elapsed, 0));
+    updateBadge(remainingSeconds());
   }
 }
