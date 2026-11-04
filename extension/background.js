@@ -402,33 +402,59 @@ function fireThreshold(minutes, currentSeconds) {
 
 // ─── Голос ────────────────────────────────────────────────────────────────
 
+// Озвучка на вкладке Turbo-PVZ. Возвращает { ok, reason? }.
+// Пробуем все вкладки (сначала активную, затем недавние): одна может быть открыта до установки/обновления
+// расширения (content-скрипта нет), заморожена Chrome или показывать страницу ошибки.
 async function speakInTab(text, isTest = false, volume = 1.0) {
-  if (!settings.speechEnabled && !isTest) return false;
-  const tabs = await chrome.tabs.query({ url: ['*://turbo-pvz.ozon.ru/*'] }); // работает по host_permissions, без права «tabs»
-  if (!tabs.length) { bgLog('Нет табов Ozon для голоса', 'warn'); return false; }
-  const tab = tabs[0];
-  try {
-    await chrome.tabs.sendMessage(tab.id, { type: 'SPEAK', text, volume });
-    bgLog(`Голос vol=${volume}`, isTest ? 'info' : 'warn');
-    return true;
-  } catch (_) {}
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: (t, v) => {
-        window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(t);
-        u.lang = 'ru-RU'; u.rate = 0.95; u.pitch = 1.0;
-        u.volume = Math.min(Math.max(v, 0), 1);
-        const rv = window.speechSynthesis.getVoices().find(x => x.lang.startsWith('ru'));
-        if (rv) u.voice = rv;
-        window.speechSynthesis.speak(u);
-      },
-      args: [text, volume],
-    });
-    bgLog(`Голос (inject) vol=${volume}`, isTest ? 'info' : 'warn');
-    return true;
-  } catch (e) { bgLog(`Ошибка голоса: ${e.message}`, 'err'); return false; }
+  if (!settings.speechEnabled && !isTest) return { ok: false, reason: 'голос выключен' };
+  const tabs = (await chrome.tabs.query({ url: ['*://turbo-pvz.ozon.ru/*'] })) // по host_permissions, без права «tabs»
+    .filter(t => !t.discarded)
+    .sort((a, b) => (b.active - a.active) || ((b.lastAccessed || 0) - (a.lastAccessed || 0)));
+  if (!tabs.length) {
+    const reason = 'нет открытой вкладки turbo-pvz.ozon.ru';
+    bgLog(`Голос: ${reason}`, 'warn');
+    return { ok: false, reason };
+  }
+  let lastError = '';
+  for (const tab of tabs) {
+    try {
+      await chrome.tabs.sendMessage(tab.id, { type: 'SPEAK', text, volume });
+      bgLog(`Голос vol=${volume}`, isTest ? 'info' : 'warn');
+      return { ok: true };
+    } catch (_) { /* content-скрипта во вкладке нет — пробуем внедрить */ }
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: (t, v) => {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(t);
+          u.lang = 'ru-RU'; u.rate = 0.95; u.pitch = 1.0;
+          u.volume = Math.min(Math.max(v, 0), 1);
+          const rv = window.speechSynthesis.getVoices().find(x => x.lang.startsWith('ru'));
+          if (rv) u.voice = rv;
+          window.speechSynthesis.speak(u);
+        },
+        args: [text, volume],
+      });
+      bgLog(`Голос (inject) vol=${volume}`, isTest ? 'info' : 'warn');
+      return { ok: true };
+    } catch (e) { lastError = e?.message || String(e); }
+  }
+  const reason = await explainSpeechError(lastError);
+  bgLog(`Ошибка голоса: ${reason} [${lastError}]`, 'err');
+  return { ok: false, reason };
+}
+
+// Понятная причина и что сделать, по тексту ошибки Chrome
+async function explainSpeechError(msg) {
+  let hasAccess = true;
+  try { hasAccess = await chrome.permissions.contains({ origins: ['*://turbo-pvz.ozon.ru/*'] }); } catch (_) {}
+  if (!hasAccess || /must request permission|Cannot access contents/i.test(msg)) {
+    return 'нет доступа к вкладке turbo-pvz.ozon.ru — обновите её (F5); если не поможет: chrome://extensions → ' +
+      'Ozon Turbo-PVZ Timer → «Сведения» → «Доступ к сайтам» → «На всех сайтах» или «На определённых сайтах» с turbo-pvz.ozon.ru';
+  }
+  if (/error page/i.test(msg)) return 'на вкладке Turbo-PVZ страница ошибки (нет сети?) — обновите её';
+  return 'вкладка Turbo-PVZ не ответила — обновите её (F5)';
 }
 
 // ─── Уведомление о старте приёмки ────────────────────────────────────────
@@ -613,7 +639,7 @@ function handleMessage(msg, _sender, sendResponse) {
     const mins = msg.minutes ?? settings.thresholds[1]?.minutes ?? 15;
     const t    = settings.thresholds.find(th => th.minutes === mins);
     speakInTab(t?.text ?? `Тест. Осталось ${mins} минут.`, true, t?.volume ?? 1.0)
-      .then(ok => sendResponse({ ok }));
+      .then(sendResponse);
     return true;
   }
 
