@@ -19,7 +19,7 @@
 | Файл | Роль |
 |---|---|
 | `manifest.json` | MV3. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions` ещё на `*.ozon.ru`, `*.ozon.com`, `api.telegram.org`, `ntfy.sh`. |
-| `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси, режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
+| `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси (PAC только для `api.telegram.org`, логин HTTP-прокси через `webRequest.onAuthRequired`), режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
 | `content.js` | Находит таймер на странице приёмки (`/receiving…`), раз в 10 с шлёт секунды в SW. Следит за SPA-навигацией. |
 | `speech.js` | Слушает `SPEAK`, говорит через `speechSynthesis` (ru-RU, rate 0.95). Если скрипта во вкладке нет — SW подставляет ту же функцию через `scripting.executeScript`. |
 | `bags-content.js` | Модуль «Авто-пакеты» (v2.1): на странице выдачи сам нажимает «+» у пакетов M/L; фильтр размера, лимиты, накопительная статистика. |

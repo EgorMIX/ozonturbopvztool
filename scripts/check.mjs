@@ -199,7 +199,7 @@ for (const t of handledTypes) if (!sentTypes.has(t)) add('warn', `MSG_NEVER_SENT
 
 if (manifest) {
   const declared = new Set(manifest.permissions ?? []);
-  for (const perm of ['alarms', 'notifications', 'storage', 'scripting', 'proxy']) {
+  for (const perm of ['alarms', 'notifications', 'storage', 'scripting', 'proxy', 'webRequest']) {
     const re = new RegExp(`chrome\\.${perm}\\.`);
     const used = jsFiles.some((f) => re.test(f.src));
     if (used && !declared.has(perm)) add('error', `PERM_MISSING:${perm}`, `код использует chrome.${perm}.*, но разрешения «${perm}» нет в manifest.json`);

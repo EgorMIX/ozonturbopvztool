@@ -153,20 +153,85 @@ function updateBadge(seconds) {
 
 // ─── Прокси ───────────────────────────────────────────────────────────────
 
+// Через прокси идут только эти хосты (PAC-скрипт), всё остальное — DIRECT.
+// Ограничение Chrome: пока прокси расширения включён, системный прокси / VPN-расширение для остальных сайтов
+// не действуют (настройка прокси в браузере одна, PAC не умеет «вернуть системный»).
+const PROXY_HOSTS = ['api.telegram.org'];
+
+// Проверка полей до того, как они попадут в текст PAC-скрипта
+function validateProxy(px) {
+  const host = String(px?.host || '').trim();
+  const port = Number(px?.port);
+  if (!host || !px?.port) return { ok: false, reason: 'укажите хост и порт' };
+  if (!/^[A-Za-z0-9.-]+$/.test(host) && !/^\[[0-9A-Fa-f:.]+\]$/.test(host)) return { ok: false, reason: `некорректный хост «${host}»` };
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false, reason: `некорректный порт «${px.port}»` };
+  if (px.type !== 'http' && px.username) {
+    return { ok: false, reason: 'Chrome не поддерживает SOCKS5 с логином/паролем — выберите HTTP-прокси или очистите логин' };
+  }
+  return { ok: true, host, port };
+}
+
+function buildPacScript(px, host, port) {
+  const target = `${px.type === 'http' ? 'PROXY' : 'SOCKS5'} ${host}:${port}`;
+  return `function FindProxyForURL(url, host) {
+  var hosts = ${JSON.stringify(PROXY_HOSTS)};
+  for (var i = 0; i < hosts.length; i++) { if (host === hosts[i]) return ${JSON.stringify(target)}; }
+  return "DIRECT";
+}`;
+}
+
+// Возвращает { ok, reason? }
 async function applyProxy() {
   const px = settings.proxy;
-  if (!px?.enabled || !px.host || !px.port) { await clearProxy(); return; }
-  const scheme = px.type === 'http' ? 'http' : 'socks5';
+  if (!px?.enabled) { await clearProxy(); return { ok: true }; }
+  const v = validateProxy(px);
+  if (!v.ok) { bgLog(`Прокси не применён: ${v.reason}`, 'err'); await clearProxy(); return v; }
   try {
+    const cur = await chrome.proxy.settings.get({ incognito: false });
+    if (cur.levelOfControl === 'controlled_by_other_extensions') {
+      const reason = 'прокси браузера уже занят другим расширением (VPN и т. п.) — отключите его или наш прокси';
+      bgLog(`Прокси не применён: ${reason}`, 'err');
+      return { ok: false, reason };
+    }
+    if (cur.levelOfControl === 'not_controllable') {
+      const reason = 'прокси браузера управляется политикой — расширение не может его менять';
+      bgLog(`Прокси не применён: ${reason}`, 'err');
+      return { ok: false, reason };
+    }
     await chrome.proxy.settings.set({
-      value: {
-        mode: 'fixed_servers',
-        rules: { proxyForHttps: { scheme, host: px.host, port: parseInt(px.port) }, bypassList: ['<local>'] },
-      },
+      value: { mode: 'pac_script', pacScript: { data: buildPacScript(px, v.host, v.port) } },
       scope: 'regular',
     });
-    bgLog(`Прокси: ${scheme}://${px.host}:${px.port}`, 'ok');
-  } catch (e) { bgLog(`Прокси error: ${e.message}`, 'err'); }
+    bgLog(`Прокси для ${PROXY_HOSTS.join(', ')}: ${px.type === 'http' ? 'http' : 'socks5'}://${v.host}:${v.port}${px.username ? ' (с логином)' : ''}`, 'ok');
+    return { ok: true };
+  } catch (e) {
+    bgLog(`Прокси error: ${e.message}`, 'err');
+    return { ok: false, reason: e.message };
+  }
+}
+
+// Логин/пароль HTTP-прокси. Слушатель регистрируется синхронно при старте SW, чтобы ловить запросы после пробуждения.
+const proxyAuthTried = new Set(); // requestId, на которые уже отдали логин — второй запрос = неверный логин/пароль
+function handleProxyAuth(details, callback) {
+  if (!details.isProxy) { callback({}); return; }
+  ready.then(() => {
+    const px = settings.proxy;
+    const ch = details.challenger || {};
+    const ours = px?.enabled && px.type === 'http' && px.username &&
+      String(ch.host || '').toLowerCase() === String(px.host || '').trim().toLowerCase() && Number(ch.port) === Number(px.port);
+    if (!ours) { callback({}); return; }
+    if (proxyAuthTried.has(details.requestId)) {
+      bgLog('Прокси отклонил логин/пароль', 'err');
+      callback({ cancel: true });
+      return;
+    }
+    if (proxyAuthTried.size > 100) proxyAuthTried.clear();
+    proxyAuthTried.add(details.requestId);
+    callback({ authCredentials: { username: px.username, password: px.password || '' } });
+  });
+}
+if (chrome.webRequest?.onAuthRequired) {
+  chrome.webRequest.onAuthRequired.addListener(handleProxyAuth, { urls: PROXY_HOSTS.map(h => `*://${h}/*`) }, ['asyncBlocking']);
 }
 
 // Снимаем только СВОЮ настройку прокси. Раньше здесь ставился mode: 'direct', и это перетирало
@@ -513,9 +578,11 @@ function handleMessage(msg, _sender, sendResponse) {
     const savedProxy = settings.proxy;
     settings.proxy = { ...msg.proxy, enabled: true };
     (async () => {
-      await applyProxy();
       try {
-        const resp = await fetch(`https://api.telegram.org/bot${msg.botToken}/getMe`);
+        const applied = await applyProxy();
+        if (!applied.ok) { sendResponse(applied); return; }
+        const resp = await fetch(`https://api.telegram.org/bot${msg.botToken}/getMe`, { signal: AbortSignal.timeout(15000) });
+        if (resp.status === 407) { sendResponse({ ok: false, reason: 'прокси требует логин/пароль или отклонил их (HTTP 407)' }); return; }
         const data = await resp.json();
         if (data.ok) {
           bgLog(`Прокси тест OK: @${data.result.username}`, 'ok');
@@ -524,7 +591,11 @@ function handleMessage(msg, _sender, sendResponse) {
           sendResponse({ ok: false, reason: data.description });
         }
       } catch (e) {
-        sendResponse({ ok: false, reason: e.message });
+        const reason = e?.name === 'TimeoutError'
+          ? 'нет ответа за 15 с — прокси недоступен или не пропускает Telegram'
+          : `${e.message} — прокси недоступен, неверный тип/порт или логин`;
+        bgLog(`Прокси тест: ${reason}`, 'err');
+        sendResponse({ ok: false, reason });
       } finally {
         settings.proxy = savedProxy;
         await applyProxy();
