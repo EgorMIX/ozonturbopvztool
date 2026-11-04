@@ -664,7 +664,7 @@ document.getElementById('btnTestSpeech').addEventListener('click', () => {
   const mins = settings.thresholds[1]?.minutes ?? 15;
   log('Тест голоса…', 'info');
   chrome.runtime.sendMessage({ type: 'DEBUG_TEST_SPEECH', minutes: mins }, (r) => {
-    log(r?.ok ? 'Голос отправлен ✓' : 'Нет табов Ozon', r?.ok ? 'ok' : 'warn');
+    log(r?.ok ? 'Голос отправлен ✓' : `Голос: ${r?.reason || 'нет ответа'}`, r?.ok ? 'ok' : 'warn');
   });
 });
 
