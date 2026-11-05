@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Сообщить об уязвимости (приватно)
+    url: https://github.com/EgorMIX/ozonturbopvztool/security/advisories/new
+    about: Не публикуйте подробности уязвимости в открытых Issues.
+  - name: Скачать последнюю версию
+    url: https://github.com/EgorMIX/ozonturbopvztool/releases/latest
+    about: Возможно, ошибка уже исправлена — проверьте последний релиз.
