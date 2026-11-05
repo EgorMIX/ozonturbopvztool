@@ -42,6 +42,7 @@ extension/            ← код расширения; только это гр�
   popup.html / .js    интерфейс: вкладки «Таймер» и «Пакеты», настройки, тесты, отладка, журнал
 scripts/              check.mjs, pack.mjs, known-issues.json
 docs/                 architecture.md, known-issues.md, backend-idea.md, store-listing.md, fixtures/ (HTML-образцы Ozon)
+.github/              ISSUE_TEMPLATE/ (форма «Сообщить об ошибке»), dependabot.yml (версии GitHub Actions)
 .github/workflows/    check.yml (npm run check:strict на PR), release.yml (Actions → Run workflow с main или тег v<версия> → zip + GitHub Release)
 README.md, CHANGELOG.md, PRIVACY.md, SECURITY.md, LICENSE (GPL-3) — публичные документы; меняешь поведение или
 права — обнови CHANGELOG.md (раздел будущей версии), а при новых данных/правах — PRIVACY.md и docs/store-listing.md

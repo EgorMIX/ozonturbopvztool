@@ -1,0 +1,9 @@
+# Зависимостей npm у проекта нет — следим только за версиями GitHub Actions в .github/workflows/.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "ci"

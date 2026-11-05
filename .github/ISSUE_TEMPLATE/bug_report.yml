@@ -1,0 +1,81 @@
+name: Сообщить об ошибке
+description: Расширение работает не так, как ожидалось
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что сообщаете! **Не вставляйте сюда** токен Telegram-бота, токен или топик ntfy, логин и пароль
+        прокси, а также имена, телефоны и номера заказов клиентов. В журнале и логах консоли Ozon встречается
+        `access_token=…` — вырежьте его.
+
+        Нашли уязвимость? Не пишите о ней здесь — сообщите приватно:
+        https://github.com/EgorMIX/ozonturbopvztool/security/advisories/new
+  - type: input
+    id: version
+    attributes:
+      label: Версия расширения
+      description: chrome://extensions → карточка «Ozon Turbo-PVZ Timer», или popup → «Обновления».
+      placeholder: "1.6.0"
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Браузер и версия
+      description: chrome://version, первая строка.
+      placeholder: "Chrome 131.0.6778.86, Windows 11"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Что не работает
+      options:
+        - Таймер не находится на странице приёмки
+        - Оповещения (пороги, крайний срок) — не пришли или пришли лишние
+        - Голос
+        - Telegram / ntfy / прокси
+        - История приёмок
+        - Авто-пакеты
+        - Настройки, рабочие часы, резервная копия, обновления
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: Что произошло и что ожидалось
+      description: По шагам — что вы делали, что увидели и что должно было случиться.
+      placeholder: |
+        1. Открыл страницу приёмки, таймер 25:00
+        2. ...
+        Ожидал: ...
+        Получил: ...
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Журнал расширения
+      description: |
+        popup → «Отладка / Тестирование» → «Лог событий», скопируйте строки вокруг ошибки.
+        Если есть — ошибки из консоли Service worker (chrome://extensions → ссылка «Service worker»).
+        Проверьте, что в тексте нет токенов и личных данных.
+      render: text
+  - type: textarea
+    id: html
+    attributes:
+      label: HTML-фрагмент страницы (если расширение не находит таймер или пакеты)
+      description: |
+        Правый клик по таймеру или блоку пакетов → «Просмотреть код» → правый клик по выделенной строке →
+        Copy → Copy outerHTML. Удалите из фрагмента имена, телефоны, номера заказов и штрихкоды.
+      render: html
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Перед отправкой
+      options:
+        - label: После обновления расширения я нажал ⟳ на chrome://extensions и обновил вкладку Turbo-PVZ (F5)
+        - label: В тексте выше нет токенов, паролей и личных данных клиентов
+          required: true
