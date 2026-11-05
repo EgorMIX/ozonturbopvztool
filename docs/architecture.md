@@ -18,7 +18,7 @@
 
 | Файл | Роль |
 |---|---|
-| `manifest.json` | MV3, 1.5.1, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
+| `manifest.json` | MV3, 1.6.0, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
 | `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси (PAC только для `api.telegram.org`, логин HTTP-прокси через `webRequest.onAuthRequired`), режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
 | `content.js` | Находит таймер на странице приёмки (`/receiving…`), раз в 10 с шлёт секунды в SW. Следит за SPA-навигацией. |
 | `speech.js` | Слушает `SPEAK`, говорит через `speechSynthesis` (ru-RU, rate 0.95). Если скрипта во вкладке нет — SW подставляет ту же функцию через `scripting.executeScript`. |
@@ -36,11 +36,21 @@
    окончания `endsAt = now + seconds·1000`: новое чтение с `endsAt` в пределах ±90 с — та же приёмка (пороги и «Приёмка
    начата» не повторяются), иначе новая (сброс `firedFor`/`startNotified`). Остаток — `remainingSeconds()` =
    `(endsAt − now)/1000`. `TIMER_LOST` только ставит `lostAt` и аларм `timer_lost_grace` (2 мин); если за это время
-   таймер не вернулся — `endSession()` снимает алармы порогов и бейдж. Для каждого включённого порога создаётся аларм `threshold_<мин>_<idx>`
-   на момент «остаток − порог»; если порог уже пройден и не срабатывал — срабатывает сразу.
+   таймер не вернулся — `endSession()` снимает алармы порогов и бейдж.
+   **Крайний срок** = `endsAt − finishMarginMin` (по умолчанию 1 мин): штрафа нет, если приёмку программно завершили
+   до него, дальше принимают излишками. Все пороги считаются **до крайнего срока** (`deadlineSeconds()`): аларм
+   `threshold_<мин>_<idx>` на момент «до крайнего срока − порог», пройденный — срабатывает сразу; в сам крайний срок —
+   аларм `deadline_reached` → `fireDeadline()` (один раз, флаг `deadlineNotified`). Бейдж и popup показывают время до
+   крайнего срока, после него — «!» / «СЕЙЧАС».
 4. `fireThreshold()` (один раз на порог за сессию, см. `firedFor`) → push (`requireInteraction` при ≤5 мин),
    голос, Telegram, ntfy — в зависимости от `notifType` и включённых каналов.
-5. Отдельно, один раз на «сессию», — уведомление «Приёмка начата» (`notifyTimerStarted`).
+5. Отдельно, один раз на «сессию», — уведомление «Приёмка начата» (`notifyTimerStarted`) с временем «завершить до».
+   Оповещения не отправляются в паузе и вне рабочих часов (`quietReason()`, `isWorkTime()`): порог при этом
+   помечается отработанным, чтобы потом не прийти устаревшим.
+7. **История:** `startSession()` заводит запись в `acceptanceHistory`, `endSession()` / новая сессия закрывают её
+   (`historyFinish()`). Итог по `lostAt` (момент, когда таймер пропал со страницы приёмки = приёмку завершили):
+   `onTime` ≤ крайнего срока, `late` — позже, но до конца таймера, `expired` — таймер дошёл до нуля на открытой вкладке,
+   `cleared` — кнопка «Сбросить», `unknown` — вкладка была закрыта/заморожена или ручной таймер.
 6. Каждые ~10 с `badge_tick` обновляет бейдж: зелёный (>30 мин), оранжевый (≤30), красный (≤5), «OFF» в режиме disabled.
 
 Режимы: `active` — всё работает; `paused` — уведомления подавляются до `pauseUntil` (аларм `pause_end`);
@@ -65,6 +75,7 @@
 | `TIMER_FOUND` | content → bg | `{seconds, url, title, debugInfo}` | `{ok}` |
 | `TIMER_LOST` | content → bg | — (таймер пропал; приёмка завершится через 2 мин) | `{ok}` |
 | `TIMER_CLEAR` | popup → bg | — (кнопка «Сбросить»: завершить приёмку сразу) | `{ok}` |
+| `CHECK_UPDATE` | popup → bg | — (кнопка «Проверить сейчас») | `{ok, current, latest?, newer?, url?, reason?}` |
 | `TIMER_MANUAL` | popup → bg | `{seconds}` | `{ok}` |
 | `GET_STATE` | popup → bg | — | `{timerState, settings, modeState}` |
 | `GET_LOG` | popup → bg | — | `{log: [{text, type}]}` |
@@ -89,17 +100,21 @@
 
 | Ключ | Кто пишет | Содержимое |
 |---|---|---|
-| `pvzSettings` | popup | `thresholds [{minutes, text, volume, enabled}]` (по умолчанию 30/15/5), `notifType` (`both`/`push`/`voice`; из него SW выводит `speechEnabled`/`notifEnabled`), `theme`, `telegram {enabled, botToken, chatId}`, `ntfy {enabled, topic, server, token, priority}`, `proxy {enabled, type, host, port, username, password}`, `bagsEnabled`, `bagsSizes`, `bagsQuota {M, L}` |
-| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified}` |
+| `pvzSettings` | popup | `thresholds [{minutes, text, volume, enabled}]` (по умолчанию 30/15/5), `notifType` (`both`/`push`/`voice`; из него SW выводит `speechEnabled`/`notifEnabled`), `theme`, `telegram {enabled, botToken, chatId}`, `ntfy {enabled, topic, server, token, priority}`, `proxy {enabled, type, host, port, username, password}`, `bagsEnabled`, `bagsSizes`, `bagsQuota {M, L}`, `finishMarginMin` (запас до конца таймера, мин), `workHours {enabled, from, to, days}`, `updateCheck` |
+| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified, sessionId, source, deadlineNotified}` |
 | `modeState` | bg | `{mode, pauseUntil}` |
 | `bagsSessionStats` | bags-content, popup (сброс) | `{M, L, updatedAt}` |
+| `acceptanceHistory` | bg (popup — показ, CSV, очистка) | `[{id, startedAt, endsAt, deadlineAt, marginMin, source: auto/manual/debug, finishedAt, result, firedFor}]`, не больше 300 |
+| `updateInfo` | bg | `{checkedAt, latest, url, current, newer, notifiedFor}` — последняя проверка релиза на GitHub |
 
 Значения по умолчанию заведены **в двух местах** (`background.js` `DEFAULT_SETTINGS` и `popup.js` `settings`) — при
 добавлении настройки правь оба. Секреты (токен бота, токен/топик ntfy, логин прокси) лежат только здесь.
 
 ## Алармы (`chrome.alarms`)
 `badge_tick` (периодический), `pause_end` (разовый), `threshold_<мин>_<idx>` (разовые, пересоздаются при каждом
-новом/изменённом таймере), `timer_lost_grace` (разовый: таймер пропал со страницы — через 2 мин завершить приёмку).
+новом/изменённом таймере), `deadline_reached` (разовый: крайний срок завершения), `timer_lost_grace` (разовый: таймер
+пропал со страницы — через 2 мин завершить приёмку), `update_check` (раз в сутки: новый релиз на GitHub через
+`api.github.com` — CORS открыт, права на хост не нужны; пока репозиторий приватный, ответ 404 и проверка молчит).
 
 ## Страницы и DOM Ozon
 - Приёмка: `https://turbo-pvz.ozon.ru/receiving-v2/main`, таймер — `div` с классом `_timer_<хэш> ozi-heading-300`,

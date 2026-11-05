@@ -298,6 +298,48 @@
     }
     .collapse-btn:hover { border-color: var(--text-mute); color: var(--text); }
 
+    /* ── Поля ввода в разделах ── */
+    .field-input {
+      padding: 5px 7px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 7px;
+      color: var(--text); font-size: 12px; outline: none; width: 72px; text-align: center;
+    }
+    .field-input:focus { border-color: var(--accent); }
+    .field-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 11px; color: var(--text-sub); }
+    .day-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 8px; }
+    .day-btn {
+      padding: 5px 0; font-size: 10px; font-weight: 600; text-align: center;
+      border: 1px solid var(--border); border-radius: 6px; background: var(--btn-bg); color: var(--text-dim); cursor: pointer;
+    }
+    .day-btn.selected { background: rgba(0,91,255,0.12); color: var(--accent); border-color: var(--accent); }
+    .btn-row { display: flex; gap: 6px; margin-top: 8px; }
+    .btn-row .btn-debug { flex: 1; }
+    .small-status { font-size: 10px; color: var(--text-dim); text-align: center; min-height: 14px; margin-top: 6px; }
+    .small-status.ok { color: var(--ok); } .small-status.err { color: var(--danger); }
+
+    /* ── Плашка «есть новая версия» ── */
+    .update-banner {
+      display: none; margin-bottom: 10px; padding: 7px 10px; border-radius: 8px; font-size: 11px;
+      background: rgba(0,91,255,0.12); border: 1px solid var(--accent); color: var(--text); cursor: pointer;
+    }
+    .update-banner.visible { display: block; }
+
+    /* ── История приёмок ── */
+    .hist-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-bottom: 8px; }
+    .hist-stat { background: var(--input-bg); border: 1px solid var(--border); border-radius: 7px; padding: 6px 4px; text-align: center; }
+    .hist-stat-val { font-size: 16px; font-weight: 700; color: var(--text); }
+    .hist-stat-label { font-size: 9px; color: var(--text-dim); margin-top: 1px; }
+    .hist-list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+    .hist-row {
+      display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 6px 8px;
+      background: var(--input-bg); border: 1px solid var(--border); border-radius: 7px; font-size: 11px;
+    }
+    .hist-when { color: var(--text); font-weight: 600; }
+    .hist-detail { color: var(--text-dim); font-size: 10px; grid-column: 1 / -1; }
+    .hist-res { font-size: 10px; font-weight: 600; }
+    .hist-res.onTime { color: var(--ok); } .hist-res.late, .hist-res.expired { color: var(--danger); }
+    .hist-res.active { color: var(--accent); } .hist-res.cleared, .hist-res.unknown { color: var(--text-mute); }
+    .hist-empty { font-size: 11px; color: var(--text-dim); text-align: center; padding: 12px 0; }
+
     /* ── Footer ── */
     .footer { text-align: center; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
     .footer-main { font-size: 10px; color: var(--text-dim); }
@@ -313,10 +355,13 @@
     <button class="theme-btn" id="themeBtn" title="Переключить тёмную/светлую тему">🌙</button>
   </div>
 
+  <div class="update-banner" id="updateBanner" title="Открыть страницу загрузки"></div>
+
   <!-- ── Tab bar ── -->
   <div class="tab-bar">
     <button class="tab-btn active" data-tab="timer">⏰ Таймер</button>
     <button class="tab-btn" data-tab="bags">📦 Пакеты</button>
+    <button class="tab-btn" data-tab="history">📜 История</button>
   </div>
 
   <!-- ════════════════════════════════════════════════════════════
@@ -326,9 +371,10 @@
 
     <!-- Таймер -->
     <div class="card">
-      <div class="status-label">Осталось времени</div>
+      <div class="status-label">До крайнего срока завершения</div>
       <div class="timer-display none" id="timerDisplay">—</div>
       <div class="sub" id="subText">Таймер не обнаружен на странице</div>
+      <div class="sub" id="deadlineLine"></div>
       <div class="badge" id="notifyBadge">🔔 Ожидание</div>
       <div class="manual-indicator" id="manualIndicator"></div>
       <div class="manual-row">
@@ -380,7 +426,12 @@
     <!-- Пороги -->
     <div class="section">
       <div class="section-title">⏱ Пороги предупреждений</div>
-      <div class="section-desc">За сколько минут и с каким текстом срабатывает оповещение.</div>
+      <div class="section-desc">Пороги считаются до <b>крайнего срока</b>: чтобы не получить штраф, приёмку нужно завершить
+        заранее, до конца таймера. В крайний срок придёт отдельное оповещение «завершите приёмку», после него
+        принимайте излишками.</div>
+      <div class="field-row" style="margin:0 0 9px">
+        Завершать за <input type="number" class="field-input" id="finishMargin" min="0" max="10" step="0.5" value="1" /> мин до конца таймера
+      </div>
       <div class="threshold-header">
         <span>Мин</span><span>Текст оповещения</span><span>Громкость</span><span></span>
       </div>
@@ -493,6 +544,57 @@
       </div>
     </div>
 
+    <!-- Рабочие часы -->
+    <div class="section">
+      <div class="section-title">🕘 Рабочие часы</div>
+      <div class="section-desc">Вне рабочих часов оповещения не отправляются (чтобы ночью не будила забытая вкладка).
+        Таймер и история продолжают работать. Если «до» раньше «с» — смена через полночь.</div>
+      <div class="setting-row" style="margin-bottom:0">
+        <div class="setting-label">Только в рабочие часы</div>
+        <label class="toggle"><input type="checkbox" id="workHoursEnabled" /><span class="toggle-slider"></span></label>
+      </div>
+      <div class="field-row">
+        с <input type="time" class="field-input" id="workFrom" value="08:00" />
+        до <input type="time" class="field-input" id="workTo" value="22:00" />
+      </div>
+      <div class="day-grid" id="workDays">
+        <button class="day-btn" data-day="1">Пн</button><button class="day-btn" data-day="2">Вт</button>
+        <button class="day-btn" data-day="3">Ср</button><button class="day-btn" data-day="4">Чт</button>
+        <button class="day-btn" data-day="5">Пт</button><button class="day-btn" data-day="6">Сб</button>
+        <button class="day-btn" data-day="0">Вс</button>
+      </div>
+    </div>
+
+    <!-- Обновления -->
+    <div class="section">
+      <div class="section-title">🔄 Обновления</div>
+      <div class="section-desc">Раз в день расширение проверяет на GitHub, вышла ли новая версия, и сообщает об этом.
+        Обновление ставится вручную: скачать zip и распаковать поверх старой папки.</div>
+      <div class="setting-row" style="margin-bottom:0">
+        <div class="setting-label">Проверять обновления<small id="versionLabel"></small></div>
+        <label class="toggle"><input type="checkbox" id="updateCheck" checked /><span class="toggle-slider"></span></label>
+      </div>
+      <div class="btn-row"><button class="btn-debug" id="btnCheckUpdate">🔍 Проверить сейчас</button></div>
+      <div class="small-status" id="updateStatus"></div>
+    </div>
+
+    <!-- Резервная копия -->
+    <div class="section">
+      <div class="section-title">💾 Резервная копия настроек</div>
+      <div class="section-desc">Сохранить настройки в файл и загрузить на другом компьютере. Токены и пароли
+        попадают в файл, только если отметить галочку, — такой файл никому не пересылайте.</div>
+      <div class="setting-row" style="margin-bottom:0">
+        <div class="setting-label">С токенами и паролями<small>Telegram, ntfy, прокси</small></div>
+        <label class="toggle"><input type="checkbox" id="exportSecrets" /><span class="toggle-slider"></span></label>
+      </div>
+      <div class="btn-row">
+        <button class="btn-debug" id="btnExportSettings">⬇️ Сохранить в файл</button>
+        <button class="btn-debug" id="btnImportSettings">⬆️ Загрузить из файла</button>
+      </div>
+      <input type="file" id="importFile" accept=".json,application/json" style="display:none" />
+      <div class="small-status" id="backupStatus"></div>
+    </div>
+
     <!-- Общие настройки -->
     <div class="section">
       <div class="section-title">⚙️ Прочие настройки</div>
@@ -599,6 +701,27 @@
     </div>
 
   </div><!-- /tab-bags -->
+
+  <!-- ════════════════════════════════════════════════════════════
+       TAB 3: ИСТОРИЯ ПРИЁМОК
+  ════════════════════════════════════════════════════════════ -->
+  <div class="tab-panel" id="tab-history">
+    <div class="section">
+      <div class="section-title">📜 История приёмок</div>
+      <div class="section-desc">Приёмка считается завершённой, когда таймер пропадает со страницы приёмки.
+        «Вовремя» — до крайнего срока. Хранится только на этом компьютере (последние 300).</div>
+      <div class="hist-summary">
+        <div class="hist-stat"><div class="hist-stat-val" id="histTotal">—</div><div class="hist-stat-label">за 30 дней</div></div>
+        <div class="hist-stat"><div class="hist-stat-val" id="histOnTime">—</div><div class="hist-stat-label">вовремя</div></div>
+        <div class="hist-stat"><div class="hist-stat-val" id="histLate">—</div><div class="hist-stat-label">с опозданием</div></div>
+      </div>
+      <div class="hist-list" id="histList"></div>
+      <div class="btn-row">
+        <button class="btn-debug" id="btnHistCsv">⬇️ Скачать CSV</button>
+        <button class="btn-debug red" id="btnHistClear">🗑 Очистить</button>
+      </div>
+    </div>
+  </div><!-- /tab-history -->
 
   <!-- ── Дебаг (всегда внизу) ── -->
   <button class="collapse-btn" id="debugToggle">🐛 Отладка / Тестирование ▾</button>

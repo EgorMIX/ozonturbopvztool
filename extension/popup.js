@@ -3,11 +3,13 @@
 
 // ─── Дефолты ──────────────────────────────────────────────────────────────
 
+// Пороги считаются до крайнего срока завершения приёмки (см. background.js)
 const DEFAULT_THRESHOLDS = [
-  { minutes: 30, text: 'Внимание! До конца приёмки осталось 30 минут.',      volume: 0.7, enabled: true },
-  { minutes: 15, text: 'Внимание! До конца приёмки осталось 15 минут!',      volume: 1.0, enabled: true },
-  { minutes: 5,  text: 'Срочно! До конца приёмки осталось всего 5 минут!!!', volume: 1.0, enabled: true },
+  { minutes: 30, text: 'Внимание! Через 30 минут крайний срок завершения приёмки.',  volume: 0.7, enabled: true },
+  { minutes: 15, text: 'Внимание! Через 15 минут крайний срок завершения приёмки!',  volume: 1.0, enabled: true },
+  { minutes: 5,  text: 'Срочно! Через 5 минут крайний срок завершения приёмки!!!',   volume: 1.0, enabled: true },
 ];
+const DEFAULT_WORK_HOURS = { enabled: false, from: '08:00', to: '22:00', days: [0, 1, 2, 3, 4, 5, 6] };
 
 let settings = {
   thresholds:    JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)),
@@ -19,6 +21,9 @@ let settings = {
   bagsSizes:     'both',  // 'M' | 'L' | 'both'
   bagsQuota:     { M: 0, L: 0 }, // 0 = без ограничения
   proxy:         { enabled: false, type: 'socks5', host: '', port: '', username: '', password: '' },
+  finishMarginMin: 1,
+  workHours:     { ...DEFAULT_WORK_HOURS },
+  updateCheck:   true,
 };
 
 // ─── Тип уведомления ──────────────────────────────────────────────────────
@@ -139,7 +144,11 @@ function renderModePanel(modeState) {
   [btnActive, btnPause, btnDisabled].forEach(b =>
     b.classList.remove('active-state', 'paused-state', 'disabled-state')
   );
-  if (currentMode === 'active') {
+  if (currentMode === 'active' && !isWorkTimeNow()) {
+    btnActive.classList.add('active-state');
+    statusEl.textContent = `🌙 Вне рабочих часов (${settings.workHours.from}–${settings.workHours.to}) — оповещения не отправляются`;
+    statusEl.className   = 'mode-status warn';
+  } else if (currentMode === 'active') {
     btnActive.classList.add('active-state');
     statusEl.textContent = '▶ Мониторинг активен — все оповещения включены';
     statusEl.className   = 'mode-status ok';
@@ -153,6 +162,21 @@ function renderModePanel(modeState) {
     statusEl.textContent = '🚫 Плагин отключён — мониторинг остановлен';
     statusEl.className   = 'mode-status danger';
   }
+}
+
+// Та же логика, что isWorkTime() в background.js (держать одинаковой)
+function isWorkTimeNow(now = new Date()) {
+  const wh = settings.workHours;
+  if (!wh?.enabled) return true;
+  const hm = (v) => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '')); return m ? Math.min(+m[1], 23) * 60 + Math.min(+m[2], 59) : null; };
+  const from = hm(wh.from), to = hm(wh.to);
+  if (from == null || to == null || from === to) return true;
+  const days = Array.isArray(wh.days) && wh.days.length ? wh.days : [0, 1, 2, 3, 4, 5, 6]; // ни одного дня = все дни
+  const t = now.getHours() * 60 + now.getMinutes();
+  if (from < to) return days.includes(now.getDay()) && t >= from && t < to;
+  if (t >= from) return days.includes(now.getDay());
+  if (t < to)    return days.includes((now.getDay() + 6) % 7);
+  return false;
 }
 
 function sendSetMode(mode, pauseMinutes = 0) {
@@ -177,33 +201,44 @@ function render(timerState) {
   const badge   = document.getElementById('notifyBadge');
   const manInd  = document.getElementById('manualIndicator');
 
+  const deadlineLine = document.getElementById('deadlineLine');
   if (!timerState || timerState.seconds == null) {
     display.className  = 'timer-display none'; display.textContent = '—';
     sub.textContent    = 'Таймер не обнаружен на странице';
+    deadlineLine.textContent = '';
     badge.textContent  = '🔔 Ожидание'; badge.className = 'badge';
     manInd.textContent = '';
     return;
   }
 
-  const elapsed = timerState.updatedAt ? (Date.now() - timerState.updatedAt) / 1000 : 0;
-  const current = Math.max(Math.round(timerState.seconds - elapsed), 0);
+  const endsAt     = timerState.endsAt ?? ((timerState.updatedAt || Date.now()) + timerState.seconds * 1000);
+  const current    = Math.max(Math.round((endsAt - Date.now()) / 1000), 0);     // до конца таймера Ozon
+  const margin     = Math.round((Number(settings.finishMarginMin) || 0) * 60);
+  const toDeadline = Math.max(current - margin, 0);                              // до крайнего срока
+  const clock      = (ms) => new Date(ms).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
-  display.textContent = formatTime(current);
-  sub.textContent     = current === 0 ? 'Время истекло!' : 'до конца приёмки';
+  display.textContent = toDeadline > 0 ? formatTime(toDeadline) : (current > 0 ? 'СЕЙЧАС' : '00:00');
+  sub.textContent     = current === 0 ? 'Время таймера истекло'
+                      : toDeadline === 0 ? 'Завершите приёмку! Не успели — принимайте излишками'
+                      : `завершить до ${clock(endsAt - margin * 1000)}`;
+  deadlineLine.textContent = current > 0 ? `таймер Ozon: ${formatTime(current)} (до ${clock(endsAt)})` : '';
   manInd.textContent  = timerState.isManual ? '✏️ Ручной режим' : '';
 
   const thresholds = settings.thresholds.filter(t => t.enabled).sort((a, b) => b.minutes - a.minutes);
-  const active     = thresholds.find(t => current <= t.minutes * 60);
+  const active     = thresholds.find(t => toDeadline <= t.minutes * 60);
 
   if (current === 0) {
     display.className = 'timer-display danger';
     badge.textContent = '🚨 Время вышло!'; badge.className = 'badge';
+  } else if (toDeadline === 0) {
+    display.className = 'timer-display danger';
+    badge.textContent = '🚨 Крайний срок — завершите приёмку'; badge.className = 'badge';
   } else if (active) {
     display.className = 'timer-display warning';
     badge.textContent = `⚠️ Порог ${active.minutes} мин!`; badge.className = 'badge';
   } else {
     display.className = 'timer-display ok';
-    const next = [...thresholds].reverse().find(t => current > t.minutes * 60);
+    const next = [...thresholds].reverse().find(t => toDeadline > t.minutes * 60);
     badge.textContent = next ? `✅ Следующий: ${next.minutes} мин` : '✅ Мониторинг активен';
     badge.className   = 'badge active';
   }
@@ -297,6 +332,9 @@ document.getElementById('saveBtn').addEventListener('click', () => {
     log('Сервер ntfy должен начинаться с https://', 'err'); showBtnError('⚠️ ntfy: нужен https://'); return;
   }
   settings.thresholds    = settings.thresholds.map(t => ({ ...t, enabled: true }));
+  settings.finishMarginMin = readFinishMargin();
+  settings.workHours     = readWorkHours();
+  settings.updateCheck   = document.getElementById('updateCheck').checked;
   settings.telegram      = {
     enabled:  document.getElementById('tgEnabled').checked,
     botToken: document.getElementById('tgBotToken').value.trim(),
@@ -334,6 +372,9 @@ function loadSettings(cb) {
         bagsSizes:     data.pvzSettings.bagsSizes     ?? 'both',
         bagsQuota:     { M: data.pvzSettings.bagsQuota?.M ?? 0, L: data.pvzSettings.bagsQuota?.L ?? 0 },
         proxy:         { enabled: false, type: 'socks5', host: '', port: '', username: '', password: '',        ...(data.pvzSettings.proxy    || {}) },
+        finishMarginMin: data.pvzSettings.finishMarginMin ?? 1,
+        workHours:     { ...DEFAULT_WORK_HOURS, ...(data.pvzSettings.workHours || {}) },
+        updateCheck:   data.pvzSettings.updateCheck !== false,
       };
     }
     applyTheme(settings.theme);
@@ -347,6 +388,9 @@ function loadSettings(cb) {
     document.getElementById('bagsEnabled').checked = settings.bagsEnabled !== false;
     applyBagsSize(settings.bagsSizes || 'both');
     loadBagsQuota(settings.bagsQuota);
+    document.getElementById('finishMargin').value = settings.finishMarginMin;
+    loadWorkHours(settings.workHours);
+    document.getElementById('updateCheck').checked = settings.updateCheck !== false;
     renderThresholds();
     if (cb) cb();
   });
@@ -521,6 +565,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     document.getElementById(`tab-${tab}`).classList.add('active');
     if (tab === 'bags') updateBagsStats();
+    if (tab === 'history') renderHistory();
     if (tab === 'timer') render(null); // обновим таймер
   });
 });
@@ -639,6 +684,211 @@ setInterval(() => {
   if (bagsTabActive) updateBagsStats();
 }, 3000);
 
+// ─── Крайний срок и рабочие часы ─────────────────────────────────────────
+
+function readFinishMargin() {
+  const v = parseFloat(String(document.getElementById('finishMargin').value).replace(',', '.'));
+  return Number.isFinite(v) ? Math.min(Math.max(v, 0), 10) : 1;
+}
+
+function loadWorkHours(wh) {
+  wh = { ...DEFAULT_WORK_HOURS, ...(wh || {}) };
+  document.getElementById('workHoursEnabled').checked = !!wh.enabled;
+  document.getElementById('workFrom').value = wh.from;
+  document.getElementById('workTo').value   = wh.to;
+  document.querySelectorAll('#workDays .day-btn').forEach(b =>
+    b.classList.toggle('selected', wh.days.includes(Number(b.dataset.day)))
+  );
+}
+
+function readWorkHours() {
+  const days = [...document.querySelectorAll('#workDays .day-btn.selected')].map(b => Number(b.dataset.day));
+  return {
+    enabled: document.getElementById('workHoursEnabled').checked,
+    from:    document.getElementById('workFrom').value || DEFAULT_WORK_HOURS.from,
+    to:      document.getElementById('workTo').value   || DEFAULT_WORK_HOURS.to,
+    days,
+  };
+}
+
+document.querySelectorAll('#workDays .day-btn').forEach(b =>
+  b.addEventListener('click', () => b.classList.toggle('selected'))
+);
+
+// ─── Обновления ───────────────────────────────────────────────────────────
+
+const APP_VERSION = chrome.runtime.getManifest().version;
+document.getElementById('versionLabel').textContent = `Установлена версия ${APP_VERSION}`;
+
+function renderUpdateBanner(info) {
+  const banner = document.getElementById('updateBanner');
+  const newer  = info?.latest && info.latest !== APP_VERSION && info.newer;
+  banner.classList.toggle('visible', !!newer);
+  if (newer) banner.textContent = `⬆️ Доступна версия ${info.latest} (у вас ${APP_VERSION}) — нажмите, чтобы скачать`;
+}
+
+const RELEASE_URL_RE = /^https:\/\/github\.com\/EgorMIX\/ozonturbopvztool\/releases\//;
+document.getElementById('updateBanner').addEventListener('click', () => {
+  chrome.storage.local.get('updateInfo', ({ updateInfo }) => {
+    const url = RELEASE_URL_RE.test(updateInfo?.url || '') ? updateInfo.url : 'https://github.com/EgorMIX/ozonturbopvztool/releases/latest';
+    chrome.tabs.create({ url });
+  });
+});
+
+document.getElementById('btnCheckUpdate').addEventListener('click', () => {
+  const status = document.getElementById('updateStatus');
+  status.textContent = '⏳ Проверяем…'; status.className = 'small-status';
+  chrome.runtime.sendMessage({ type: 'CHECK_UPDATE' }, (r) => {
+    if (r?.ok && r.newer)      { status.textContent = `⬆️ Доступна версия ${r.latest}`; status.className = 'small-status ok'; }
+    else if (r?.ok)            { status.textContent = `✅ У вас последняя версия (${r.current})`; status.className = 'small-status ok'; }
+    else                       { status.textContent = `❌ ${r?.reason || 'нет ответа'}`; status.className = 'small-status err'; }
+    chrome.storage.local.get('updateInfo', ({ updateInfo }) => renderUpdateBanner(updateInfo));
+  });
+});
+
+chrome.storage.local.get('updateInfo', ({ updateInfo }) => renderUpdateBanner(updateInfo));
+
+// ─── Резервная копия настроек ─────────────────────────────────────────────
+// Файл: { app: 'ozon-turbo-pvz-settings', format: 1, version, exportedAt, withSecrets, settings }.
+// Без галочки секреты (токены, chat id, топик ntfy, логин/пароль прокси) в файл не пишутся, а при загрузке
+// такого файла текущие секреты сохраняются.
+
+const BACKUP_APP = 'ozon-turbo-pvz-settings';
+const SECRET_FIELDS = { telegram: ['botToken', 'chatId'], ntfy: ['topic', 'token'], proxy: ['username', 'password'] };
+const BACKUP_KEYS = ['thresholds', 'notifType', 'theme', 'telegram', 'ntfy', 'proxy', 'bagsEnabled', 'bagsSizes',
+  'bagsQuota', 'finishMarginMin', 'workHours', 'updateCheck'];
+
+function showBackupStatus(text, ok) {
+  const el = document.getElementById('backupStatus');
+  el.textContent = text; el.className = `small-status ${ok ? 'ok' : 'err'}`;
+  setTimeout(() => { el.textContent = ''; }, 6000);
+}
+
+function downloadFile(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+const today = () => new Date().toISOString().slice(0, 10);
+
+document.getElementById('btnExportSettings').addEventListener('click', () => {
+  chrome.storage.local.get('pvzSettings', ({ pvzSettings }) => {
+    const src = pvzSettings || settings;
+    const withSecrets = document.getElementById('exportSecrets').checked;
+    const out = {};
+    for (const k of BACKUP_KEYS) if (src[k] !== undefined) out[k] = JSON.parse(JSON.stringify(src[k]));
+    if (!withSecrets) {
+      for (const [grp, fields] of Object.entries(SECRET_FIELDS)) if (out[grp]) for (const f of fields) delete out[grp][f];
+    }
+    const file = { app: BACKUP_APP, format: 1, version: APP_VERSION, exportedAt: new Date().toISOString(), withSecrets, settings: out };
+    downloadFile(`ozon-turbo-pvz-settings-${today()}.json`, JSON.stringify(file, null, 2), 'application/json');
+    showBackupStatus(withSecrets ? '✅ Сохранено с токенами — храните файл в надёжном месте' : '✅ Сохранено (без токенов и паролей)', true);
+  });
+});
+
+document.getElementById('btnImportSettings').addEventListener('click', () => document.getElementById('importFile').click());
+
+document.getElementById('importFile').addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = '';
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch (_) { showBackupStatus('❌ Это не JSON-файл', false); return; }
+  if (data?.app !== BACKUP_APP || typeof data.settings !== 'object' || !data.settings) {
+    showBackupStatus('❌ Это не файл настроек Ozon Turbo-PVZ', false); return;
+  }
+  const inc = data.settings;
+  if (inc.thresholds !== undefined && !(Array.isArray(inc.thresholds) &&
+      inc.thresholds.every(t => Number.isFinite(Number(t?.minutes)) && typeof (t.text ?? '') === 'string'))) {
+    showBackupStatus('❌ В файле повреждены пороги', false); return;
+  }
+  const next = { ...settings };
+  for (const k of BACKUP_KEYS) {
+    if (inc[k] === undefined) continue;
+    next[k] = (typeof inc[k] === 'object' && !Array.isArray(inc[k]) && inc[k] !== null)
+      ? { ...(settings[k] || {}), ...inc[k] }  // секреты, которых нет в файле, остаются текущими
+      : inc[k];
+  }
+  next.thresholds = next.thresholds.map(t => ({
+    minutes: Math.max(1, Math.round(Number(t.minutes))), text: String(t.text || '').slice(0, 140),
+    volume: Math.min(Math.max(Number(t.volume ?? 1), 0), 1), enabled: t.enabled !== false,
+  }));
+  next.speechEnabled = next.notifType !== 'push';
+  next.notifEnabled  = next.notifType !== 'voice';
+  chrome.storage.local.set({ pvzSettings: next }, () => {
+    chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings: next });
+    loadSettings();
+    showBackupStatus(`✅ Настройки загружены${data.withSecrets ? ' (с токенами)' : ''}`, true);
+  });
+});
+
+// ─── История приёмок ──────────────────────────────────────────────────────
+// Пишет background.js (chrome.storage.local.acceptanceHistory), здесь — показ, CSV и очистка.
+
+const RESULT_LABELS = {
+  active: 'идёт', onTime: 'вовремя', late: 'после крайнего срока', expired: 'таймер истёк',
+  cleared: 'сброшено вручную', unknown: 'нет данных',
+};
+const SOURCE_LABELS = { auto: 'страница', manual: 'вручную', debug: 'тест' };
+
+const fmtDate  = (ms) => ms ? new Date(ms).toLocaleDateString('ru-RU') : '';
+const fmtClock = (ms) => ms ? new Date(ms).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '—';
+
+function renderHistory() {
+  chrome.storage.local.get('acceptanceHistory', ({ acceptanceHistory }) => {
+    const list = Array.isArray(acceptanceHistory) ? acceptanceHistory : [];
+    const since = Date.now() - 30 * 24 * 3600 * 1000;
+    const recent = list.filter(e => e.startedAt >= since && e.source !== 'debug');
+    document.getElementById('histTotal').textContent  = recent.length;
+    document.getElementById('histOnTime').textContent = recent.filter(e => e.result === 'onTime').length;
+    document.getElementById('histLate').textContent   = recent.filter(e => e.result === 'late' || e.result === 'expired').length;
+
+    const box = document.getElementById('histList');
+    box.textContent = '';
+    if (!list.length) {
+      const empty = document.createElement('div');
+      empty.className = 'hist-empty'; empty.textContent = 'Пока нет ни одной приёмки';
+      box.appendChild(empty); return;
+    }
+    for (const e of [...list].reverse().slice(0, 50)) {
+      const row  = document.createElement('div'); row.className = 'hist-row';
+      const when = document.createElement('div'); when.className = 'hist-when';
+      when.textContent = `${fmtDate(e.startedAt)} ${fmtClock(e.startedAt)}`;
+      const res  = document.createElement('div'); res.className = `hist-res ${e.result}`;
+      res.textContent = RESULT_LABELS[e.result] || e.result;
+      const det  = document.createElement('div'); det.className = 'hist-detail';
+      det.textContent = `крайний срок ${fmtClock(e.deadlineAt)} · завершено ${fmtClock(e.finishedAt)} · ${SOURCE_LABELS[e.source] || e.source || ''}`;
+      row.append(when, res, det);
+      box.appendChild(row);
+    }
+  });
+}
+
+// CSV для Excel: разделитель «;», BOM для кириллицы
+function historyCsv(list) {
+  const esc = (v) => { const t = String(v ?? ''); return /[";\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  const head = ['Дата', 'Начало', 'Крайний срок', 'Конец таймера', 'Завершено', 'Итог', 'Запас, мин', 'Источник', 'Сработавшие пороги, мин'];
+  const rows = list.map(e => [fmtDate(e.startedAt), fmtClock(e.startedAt), fmtClock(e.deadlineAt), fmtClock(e.endsAt),
+    e.finishedAt ? fmtClock(e.finishedAt) : '', RESULT_LABELS[e.result] || e.result, e.marginMin ?? '',
+    SOURCE_LABELS[e.source] || e.source || '', (e.firedFor || []).join(' ')]);
+  return '﻿' + [head, ...rows].map(r => r.map(esc).join(';')).join('\r\n') + '\r\n';
+}
+
+document.getElementById('btnHistCsv').addEventListener('click', () => {
+  chrome.storage.local.get('acceptanceHistory', ({ acceptanceHistory }) => {
+    const list = Array.isArray(acceptanceHistory) ? acceptanceHistory : [];
+    downloadFile(`ozon-turbo-pvz-history-${today()}.csv`, historyCsv(list), 'text/csv;charset=utf-8');
+  });
+});
+
+document.getElementById('btnHistClear').addEventListener('click', () => {
+  if (!confirm('Удалить всю историю приёмок с этого компьютера?')) return;
+  chrome.storage.local.remove('acceptanceHistory', renderHistory);
+});
+
 // ─── Дебаг-панель ─────────────────────────────────────────────────────────
 
 const debugPanel  = document.getElementById('debugPanel');
@@ -703,7 +953,7 @@ document.getElementById('btnTestAll').addEventListener('click', () => {
 
 document.getElementById('btnSimTimer').addEventListener('click', () => {
   const maxMins = Math.max(...settings.thresholds.filter(t => t.enabled).map(t => t.minutes), 30);
-  const sec = maxMins * 60 + 70;
+  const sec = maxMins * 60 + Math.round(readFinishMargin() * 60) + 70; // пороги считаются до крайнего срока
   log(`Симуляция: ${formatTime(sec)} (~1 мин до первого порога)`, 'warn');
   chrome.runtime.sendMessage({ type: 'DEBUG_SIM_TIMER', seconds: sec }, (r) => {
     log(r?.ok ? 'Симуляция запущена ✓' : 'Ошибка', r?.ok ? 'ok' : 'err');
@@ -745,6 +995,9 @@ document.getElementById('btnReset').addEventListener('click', () => {
         bagsEnabled: true,
         bagsSizes:   'both',
         bagsQuota:   { M: 0, L: 0 },
+        finishMarginMin: 1,
+        workHours:   { ...DEFAULT_WORK_HOURS },
+        updateCheck: true,
       };
       loadSettings();
       render(null);
@@ -765,7 +1018,8 @@ loadSettings(() => {
 setInterval(() => {
   chrome.storage.local.get(['timerState', 'modeState'], (data) => {
     render(data.timerState || null);
-    if (data.modeState) renderModePanel(data.modeState);
+    // modeState в storage появляется только после первой смены режима; по умолчанию — «активен»
+    renderModePanel(data.modeState || { mode: 'active', pauseUntil: null });
   });
 }, 1000);
 
