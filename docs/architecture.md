@@ -51,6 +51,12 @@
    (`historyFinish()`). Итог по `lostAt` (момент, когда таймер пропал со страницы приёмки = приёмку завершили):
    `onTime` ≤ крайнего срока, `late` — позже, но до конца таймера, `expired` — таймер дошёл до нуля на открытой вкладке,
    `cleared` — кнопка «Сбросить», `unknown` — вкладка была закрыта/заморожена или ручной таймер.
+8. **Перевозки:** на той же странице приёмки `content.js` читает виджет «Перевозки» (`findCarriages()`, образец
+   `docs/fixtures/carriages-widget.html`) и при изменении шлёт `CARRIAGES_UPDATE`. В приёмку (`timerState.carriages`)
+   попадают только перевозки со статусом «Приёмка»: пока он такой, «всего» может меняться (`totalFirst` — первое
+   значение); после завершения цифры не меняются, поэтому другие статусы игнорируются. Если таймер уже пропал, а
+   перевозка ещё «Приёмка», итог дописывается в недавнюю запись истории. Виджет исключён из поиска таймера
+   (`NOT_TIMER_AREAS`): в нём есть время доставки «10:49», которое иначе принималось за таймер.
 6. Каждые ~10 с `badge_tick` обновляет бейдж: зелёный (>30 мин), оранжевый (≤30), красный (≤5), «OFF» в режиме disabled.
 
 Режимы: `active` — всё работает; `paused` — уведомления подавляются до `pauseUntil` (аларм `pause_end`);
@@ -102,10 +108,10 @@
 | Ключ | Кто пишет | Содержимое |
 |---|---|---|
 | `pvzSettings` | popup | `thresholds [{minutes, text, volume, enabled}]` (по умолчанию 30/15/5), `notifType` (`both`/`push`/`voice`; из него SW выводит `speechEnabled`/`notifEnabled`), `theme`, `telegram {enabled, botToken, chatId}`, `ntfy {enabled, topic, server, token, priority}`, `proxy {enabled, type, host, port, username, password}`, `bagsEnabled`, `bagsSizes`, `bagsQuota {M, L}`, `finishMarginMin` (запас до конца таймера, мин), `workHours {enabled, from, to, days}`, `updateCheck` |
-| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified, sessionId, source, deadlineNotified}` |
+| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified, sessionId, source, deadlineNotified, carriages}` |
 | `modeState` | bg | `{mode, pauseUntil}` |
 | `bagsSessionStats` | bags-content, popup (сброс) | `{M, L, updatedAt}` |
-| `acceptanceHistory` | bg (popup — показ, CSV, очистка) | `[{id, startedAt, endsAt, deadlineAt, marginMin, source: auto/manual/debug, finishedAt, result, firedFor}]`, не больше 300 |
+| `acceptanceHistory` | bg (popup — показ, CSV, очистка) | `[{id, startedAt, endsAt, deadlineAt, marginMin, source: auto/manual/debug, finishedAt, result, firedFor, carriages: [{number, source, accepted, total, totalFirst}]}]`, не больше 300 |
 | `carriagesState` | bg | `{items, seenAt}` — последнее, что прислал виджет «Перевозки» (для привязки к приёмке, начатой позже) |
 | `updateInfo` | bg | `{checkedAt, latest, url, current, newer, notifiedFor}` — последняя проверка релиза на GitHub |
 
