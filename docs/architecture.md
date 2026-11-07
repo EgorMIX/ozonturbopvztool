@@ -18,7 +18,7 @@
 
 | Файл | Роль |
 |---|---|
-| `manifest.json` | MV3, 1.6.0, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
+| `manifest.json` | MV3, 1.7.0, Chrome ≥ 108. Content-скрипты (`content.js`+`speech.js`, отдельно `bags-content.js`) — только на `*://turbo-pvz.ozon.ru/*`, `document_idle`. `host_permissions`: `turbo-pvz.ozon.ru`, `api.telegram.org`, `ntfy.sh`. Открытых ресурсов (`web_accessible_resources`) нет. |
 | `background.js` | Service worker: состояние таймера, алармы порогов, бейдж, push, голос (через вкладку), Telegram, ntfy, прокси (PAC только для `api.telegram.org`, логин HTTP-прокси через `webRequest.onAuthRequired`), режимы (active / paused / disabled), журнал событий (в памяти, ≤120 записей). |
 | `content.js` | Находит таймер на странице приёмки (`/receiving…`), раз в 10 с шлёт секунды в SW. Следит за SPA-навигацией. |
 | `speech.js` | Слушает `SPEAK`, говорит через `speechSynthesis` (ru-RU, rate 0.95). Если скрипта во вкладке нет — SW подставляет ту же функцию через `scripting.executeScript`. |
@@ -51,6 +51,12 @@
    (`historyFinish()`). Итог по `lostAt` (момент, когда таймер пропал со страницы приёмки = приёмку завершили):
    `onTime` ≤ крайнего срока, `late` — позже, но до конца таймера, `expired` — таймер дошёл до нуля на открытой вкладке,
    `cleared` — кнопка «Сбросить», `unknown` — вкладка была закрыта/заморожена или ручной таймер.
+8. **Перевозки:** на той же странице приёмки `content.js` читает виджет «Перевозки» (`findCarriages()`, образец
+   `docs/fixtures/carriages-widget.html`) и при изменении шлёт `CARRIAGES_UPDATE`. В приёмку (`timerState.carriages`)
+   попадают только перевозки со статусом «Приёмка»: пока он такой, «всего» может меняться (`totalFirst` — первое
+   значение); после завершения цифры не меняются, поэтому другие статусы игнорируются. Если таймер уже пропал, а
+   перевозка ещё «Приёмка», итог дописывается в недавнюю запись истории. Виджет исключён из поиска таймера
+   (`NOT_TIMER_AREAS`): в нём есть время доставки «10:49», которое иначе принималось за таймер.
 6. Каждые ~10 с `badge_tick` обновляет бейдж: зелёный (>30 мин), оранжевый (≤30), красный (≤5), «OFF» в режиме disabled.
 
 Режимы: `active` — всё работает; `paused` — уведомления подавляются до `pauseUntil` (аларм `pause_end`);
@@ -75,6 +81,7 @@
 | `TIMER_FOUND` | content → bg | `{seconds, url, title, debugInfo}` | `{ok}` |
 | `TIMER_LOST` | content → bg | — (таймер пропал; приёмка завершится через 2 мин) | `{ok}` |
 | `TIMER_CLEAR` | popup → bg | — (кнопка «Сбросить»: завершить приёмку сразу) | `{ok}` |
+| `CARRIAGES_UPDATE` | content → bg | `{items: [{number, source, status, accepted, total}]}` — виджет «Перевозки» на странице приёмки, при изменении | `{ok}` |
 | `CHECK_UPDATE` | popup → bg | — (кнопка «Проверить сейчас») | `{ok, current, latest?, newer?, url?, reason?}` |
 | `TIMER_MANUAL` | popup → bg | `{seconds}` | `{ok}` |
 | `GET_STATE` | popup → bg | — | `{timerState, settings, modeState}` |
@@ -101,10 +108,11 @@
 | Ключ | Кто пишет | Содержимое |
 |---|---|---|
 | `pvzSettings` | popup | `thresholds [{minutes, text, volume, enabled}]` (по умолчанию 30/15/5), `notifType` (`both`/`push`/`voice`; из него SW выводит `speechEnabled`/`notifEnabled`), `theme`, `telegram {enabled, botToken, chatId}`, `ntfy {enabled, topic, server, token, priority}`, `proxy {enabled, type, host, port, username, password}`, `bagsEnabled`, `bagsSizes`, `bagsQuota {M, L}`, `finishMarginMin` (запас до конца таймера, мин), `workHours {enabled, from, to, days}`, `updateCheck` |
-| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified, sessionId, source, deadlineNotified}` |
+| `timerState` | bg | `{seconds, updatedAt, endsAt, lostAt, url, title, firedFor [минуты], isManual, startNotified, sessionId, source, deadlineNotified, carriages}` |
 | `modeState` | bg | `{mode, pauseUntil}` |
 | `bagsSessionStats` | bags-content, popup (сброс) | `{M, L, updatedAt}` |
-| `acceptanceHistory` | bg (popup — показ, CSV, очистка) | `[{id, startedAt, endsAt, deadlineAt, marginMin, source: auto/manual/debug, finishedAt, result, firedFor}]`, не больше 300 |
+| `acceptanceHistory` | bg (popup — показ, CSV, очистка) | `[{id, startedAt, endsAt, deadlineAt, marginMin, source: auto/manual/debug, finishedAt, result, firedFor, carriages: [{number, source, accepted, total, totalFirst}]}]`, не больше 300 |
+| `carriagesState` | bg | `{items, seenAt}` — последнее, что прислал виджет «Перевозки» (для привязки к приёмке, начатой позже) |
 | `updateInfo` | bg | `{checkedAt, latest, url, current, newer, notifiedFor}` — последняя проверка релиза на GitHub |
 
 Значения по умолчанию заведены **в двух местах** (`background.js` `DEFAULT_SETTINGS` и `popup.js` `settings`) — при

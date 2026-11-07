@@ -61,6 +61,7 @@ const emptyTimerState = () => ({
   sessionId:        null,  // id записи в истории приёмок
   source:           null,  // 'auto' | 'manual' | 'debug'
   deadlineNotified: false, // оповещение «крайний срок» уже отправлено
+  carriages:        [],    // перевозки в статусе «Приёмка»: [{number, source, accepted, total, totalFirst}]
 });
 let timerState = emptyTimerState();
 
@@ -145,6 +146,66 @@ function clearThresholdAlarms() {
   );
 }
 
+// ─── Перевозки (виджет «Перевозки» на странице Turbo-PVZ) ─────────────────
+// content.js шлёт CARRIAGES_UPDATE с номером, откуда, статусом и «Отправления: принято из всего».
+// Пока у перевозки статус «Приёмка», «всего» может расти и уменьшаться; после завершения не меняется —
+// поэтому данные берём только у перевозок в статусе «Приёмка», а последнее такое значение и есть итог.
+
+const ACCEPTANCE_STATUS_RE = /при[её]мк/i;
+const CARRIAGE_FRESH_MS    = 15 * 60 * 1000;  // перевозку, увиденную до старта таймера, привязываем, если не старше
+let lastCarriages = { items: [], seenAt: 0 };  // последнее, что прислал content.js (копия в storage: carriagesState)
+
+function sanitizeCarriages(raw) {
+  if (!Array.isArray(raw)) return [];
+  const int = (v) => (Number.isInteger(v) && v >= 0 && v <= 100000 ? v : null);
+  return raw.slice(0, 20).map(c => ({
+    number:   String(c?.number || '').replace(/\D/g, '').slice(0, 20),
+    source:   String(c?.source || '').slice(0, 60),
+    status:   String(c?.status || '').slice(0, 40),
+    accepted: int(c?.accepted),
+    total:    int(c?.total),
+  })).filter(c => c.number);
+}
+
+// Обновить список перевозок приёмки свежими значениями (totalFirst — каким «всего» было, когда увидели впервые)
+function mergeCarriages(prev, fresh) {
+  const byNum = new Map((prev || []).map(c => [c.number, { ...c }]));
+  for (const c of fresh) {
+    if (c.total == null) continue;
+    const old = byNum.get(c.number);
+    byNum.set(c.number, {
+      number: c.number, source: c.source || old?.source || '',
+      accepted: c.accepted, total: c.total, totalFirst: old?.totalFirst ?? c.total,
+    });
+  }
+  return [...byNum.values()];
+}
+
+function acceptanceCarriages(items) {
+  return items.filter(c => ACCEPTANCE_STATUS_RE.test(c.status) && c.total != null);
+}
+
+function onCarriagesUpdate(items) {
+  const now = Date.now();
+  lastCarriages = { items, seenAt: now };
+  chrome.storage.local.set({ carriagesState: lastCarriages });
+  const inAcc = acceptanceCarriages(items);
+  if (!inAcc.length) return;
+  if (timerState.seconds != null) {
+    timerState.carriages = mergeCarriages(timerState.carriages, inAcc);
+    chrome.storage.local.set({ timerState });
+  }
+  // Таймер уже пропал (приёмку закрыли), а перевозка ещё «Приёмка» — допишем итог в недавнюю запись истории
+  const nums = new Set(inAcc.map(c => c.number));
+  historyUpdate(list => {
+    for (const e of list.slice(-5)) {
+      if (e.id === timerState.sessionId || !e.carriages?.some(c => nums.has(c.number))) continue;
+      if (e.finishedAt != null && now - e.finishedAt > 2 * 3600 * 1000) continue;
+      e.carriages = mergeCarriages(e.carriages, inAcc.filter(c => e.carriages.some(x => x.number === c.number)));
+    }
+  });
+}
+
 // ─── История приёмок ──────────────────────────────────────────────────────
 // chrome.storage.local.acceptanceHistory — массив записей, старые сверху, не больше HISTORY_MAX.
 // Запись: { id, startedAt, endsAt, deadlineAt, marginMin, source, finishedAt, result, firedFor }.
@@ -170,6 +231,7 @@ function historyStart(st) {
   const entry = {
     id: st.sessionId, startedAt: st.updatedAt, endsAt: st.endsAt, deadlineAt: st.endsAt - marginSec() * 1000,
     marginMin: marginSec() / 60, source: st.source, finishedAt: null, result: 'active', firedFor: [],
+    carriages: (st.carriages || []).map(c => ({ ...c })),
   };
   historyUpdate(list => { list.push(entry); });
 }
@@ -197,6 +259,7 @@ function historyFinish(st, reasonCode) {
     const e = list.find(x => x.id === st.sessionId);
     if (!e) return;
     Object.assign(e, { endsAt: st.endsAt ?? e.endsAt, finishedAt, result, firedFor: [...(st.firedFor || [])] });
+    if (st.carriages?.length) e.carriages = mergeCarriages(e.carriages, st.carriages);
     e.deadlineAt = e.endsAt - (e.marginMin ?? 1) * 60 * 1000;
   });
 }
@@ -220,6 +283,8 @@ function startSession(seconds, { url, title, source }) {
   timerState = {
     ...emptyTimerState(), seconds, updatedAt: now, endsAt: now + seconds * 1000, url, title,
     isManual: source === 'manual', source, sessionId: `s${now}`,
+    // перевозка могла попасть в виджет «Приёмка» раньше, чем на странице появился таймер
+    carriages: now - lastCarriages.seenAt <= CARRIAGE_FRESH_MS ? mergeCarriages([], acceptanceCarriages(lastCarriages.items)) : [],
   };
   chrome.storage.local.set({ timerState });
   historyStart(timerState);
@@ -775,7 +840,7 @@ async function openUpdatePage() {
 // Кто что может слать: content-скрипты (вкладка Ozon) — только данные таймера; всё остальное — только
 // страницы самого расширения (popup). Страница Ozon до runtime не дотянется (нет externally_connectable),
 // это защита на случай ошибки в content-скрипте.
-const CONTENT_MSG_TYPES = new Set(['TIMER_FOUND', 'TIMER_LOST']);
+const CONTENT_MSG_TYPES = new Set(['TIMER_FOUND', 'TIMER_LOST', 'CARRIAGES_UPDATE']);
 function isAllowedSender(msg, sender) {
   if (sender.id !== chrome.runtime.id) return false;
   // Страница расширения (popup — и всплывающим окном, и открытая во вкладке) — по адресу, а не по sender.tab
@@ -850,6 +915,11 @@ function handleMessage(msg, _sender, sendResponse) {
       chrome.alarms.create(LOST_GRACE_ALARM, { delayInMinutes: LOST_GRACE_MIN });
       bgLog(`Таймер пропал со страницы — ждём ${LOST_GRACE_MIN} мин, пороги пока активны`, 'info');
     }
+    sendResponse({ ok: true });
+  }
+
+  else if (msg.type === 'CARRIAGES_UPDATE') {
+    onCarriagesUpdate(sanitizeCarriages(msg.items));
     sendResponse({ ok: true });
   }
 
@@ -990,7 +1060,7 @@ function handleMessage(msg, _sender, sendResponse) {
 // Все обработчики событий сначала делают `await ready`, чтобы работать с состоянием из storage,
 // а не с дефолтами (иначе аларм порога видит seconds === null и уведомление теряется).
 // Промис никогда не отклоняется: при ошибке чтения работаем с дефолтами.
-const ready = chrome.storage.local.get(['timerState', 'pvzSettings', 'modeState'])
+const ready = chrome.storage.local.get(['timerState', 'pvzSettings', 'modeState', 'carriagesState'])
   .then(applyLoadedState)
   .catch((e) => bgLog(`Ошибка загрузки состояния: ${e?.message || e}`, 'err'));
 
@@ -1011,6 +1081,8 @@ function applyLoadedState(data) {
   }
   if (data.timerState) timerState = data.timerState;
   if (data.modeState)  modeState  = data.modeState;
+  if (data.carriagesState?.items) lastCarriages = data.carriagesState;
+  if (!Array.isArray(timerState.carriages)) timerState.carriages = [];
 
   applyProxy();
   ensureUpdateAlarm();

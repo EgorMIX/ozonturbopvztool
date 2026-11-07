@@ -113,6 +113,11 @@
 
   // ─── Поиск таймера ────────────────────────────────────────────────────────
 
+  // Блоки, где время — не таймер приёмки: в виджете «Перевозки» есть время доставки («10:49»), а рядом слово
+  // «Приёмка» — без исключения запасной поиск принимал его за таймер, когда настоящий пропадал.
+  const NOT_TIMER_AREAS = '[class*="_carriagesWidget"]';
+  const inNotTimerArea = (el) => Boolean(el.closest?.(NOT_TIMER_AREAS));
+
   function findTimerElement() {
     // Шаг 1: приоритетные селекторы
     // На разрешённой странице (turbo-pvz.ozon.ru/receiving-v2) таймер _timer_ не требует
@@ -136,7 +141,7 @@
       for (const el of els) {
         const txt     = (el.innerText || el.textContent || '').trim();
         const seconds = parseTimeFromText(txt);
-        if (seconds !== null && hasRelevantContext(el)) {
+        if (seconds !== null && !inNotTimerArea(el) && hasRelevantContext(el)) {
           return { element: el, seconds, matchedBy: `selector: ${sel}`, text: txt };
         }
       }
@@ -156,6 +161,7 @@
       if (txt.length > 40) continue;
       const seconds = parseTimeFromText(txt);
       if (seconds === null) continue;
+      if (inNotTimerArea(el)) continue;
       if (!hasRelevantContext(el)) continue;
       return { element: el, seconds, matchedBy: 'context search', text: txt };
     }
@@ -187,6 +193,42 @@
     });
   }
 
+  // ─── Виджет «Перевозки» (на странице приёмки /receiving-v2/main) ──────────
+  // Образец — docs/fixtures/carriages-widget.html. У каждой перевозки: номер, откуда, статус (бейдж),
+  // «Отправления: N из M» (принято из всего; M может меняться, пока идёт приёмка).
+
+  const ACCEPTED_OF_TOTAL = /(\d+)\s*из\s*(\d+)/;
+
+  function findCarriages() {
+    const items = [];
+    for (const item of document.querySelectorAll('[class*="_carriagesWidgetItem_"]')) {
+      const number = ((item.querySelector('[class*="_carriageNumber_"]')?.textContent || '').match(/\d{3,20}/) || [])[0];
+      if (!number) continue;
+      const source = (item.querySelector('[class*="_sourcePlaceName_"]')?.textContent || '').trim().slice(0, 60);
+      const status = (item.querySelector('[class*="_status_"]')?.textContent || '').trim().slice(0, 40);
+      let m = null;
+      // значение — следующий элемент после подписи «Отправления»
+      for (const lbl of item.querySelectorAll('[class*="_footerLabel_"]')) {
+        if (/отправлени/i.test(lbl.textContent || '')) m = (lbl.nextElementSibling?.textContent || '').match(ACCEPTED_OF_TOTAL);
+      }
+      // запасной путь, если поменяются классы подписи: любой текст «N из M» в карточке
+      if (!m) m = (item.textContent || '').match(ACCEPTED_OF_TOTAL);
+      items.push({ number, source, status, accepted: m ? +m[1] : null, total: m ? +m[2] : null });
+      if (items.length >= 20) break;
+    }
+    return items;
+  }
+
+  let lastCarriagesSig = '';
+  function scanCarriages() {
+    const items = findCarriages();
+    if (!items.length) return;  // виджета нет на этой странице — ничего не шлём
+    const sig = JSON.stringify(items);
+    if (sig === lastCarriagesSig || !chrome.runtime?.id) return;
+    lastCarriagesSig = sig;
+    chrome.runtime.sendMessage({ type: 'CARRIAGES_UPDATE', items }).catch(() => {});
+  }
+
   // ─── Сканирование ─────────────────────────────────────────────────────────
 
   function scan() {
@@ -199,6 +241,7 @@
       return;
     }
 
+    scanCarriages(); // виджет «Перевозки» — на той же странице приёмки, что и таймер
     const result = findTimerElement();
 
     if (result) {

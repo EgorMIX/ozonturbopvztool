@@ -324,7 +324,7 @@
     .update-banner.visible { display: block; }
 
     /* ── История приёмок ── */
-    .hist-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-bottom: 8px; }
+    .hist-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-bottom: 8px; }
     .hist-stat { background: var(--input-bg); border: 1px solid var(--border); border-radius: 7px; padding: 6px 4px; text-align: center; }
     .hist-stat-val { font-size: 16px; font-weight: 700; color: var(--text); }
     .hist-stat-label { font-size: 9px; color: var(--text-dim); margin-top: 1px; }
@@ -334,7 +334,7 @@
       background: var(--input-bg); border: 1px solid var(--border); border-radius: 7px; font-size: 11px;
     }
     .hist-when { color: var(--text); font-weight: 600; }
-    .hist-detail { color: var(--text-dim); font-size: 10px; grid-column: 1 / -1; }
+    .hist-detail { color: var(--text-dim); font-size: 10px; grid-column: 1 / -1; white-space: pre-line; }
     .hist-res { font-size: 10px; font-weight: 600; }
     .hist-res.onTime { color: var(--ok); } .hist-res.late, .hist-res.expired { color: var(--danger); }
     .hist-res.active { color: var(--accent); } .hist-res.cleared, .hist-res.unknown { color: var(--text-mute); }
@@ -375,6 +375,7 @@
       <div class="timer-display none" id="timerDisplay">—</div>
       <div class="sub" id="subText">Таймер не обнаружен на странице</div>
       <div class="sub" id="deadlineLine"></div>
+      <div class="sub" id="carriageLine"></div>
       <div class="badge" id="notifyBadge">🔔 Ожидание</div>
       <div class="manual-indicator" id="manualIndicator"></div>
       <div class="manual-row">
@@ -709,11 +710,13 @@
     <div class="section">
       <div class="section-title">📜 История приёмок</div>
       <div class="section-desc">Приёмка считается завершённой, когда таймер пропадает со страницы приёмки.
-        «Вовремя» — до крайнего срока. Хранится только на этом компьютере (последние 300).</div>
+        «Вовремя» — до крайнего срока. Отправления — из виджета «Перевозки» (принято из всего), пока у перевозки
+        статус «Приёмка». Хранится только на этом компьютере (последние 300).</div>
       <div class="hist-summary">
         <div class="hist-stat"><div class="hist-stat-val" id="histTotal">—</div><div class="hist-stat-label">за 30 дней</div></div>
         <div class="hist-stat"><div class="hist-stat-val" id="histOnTime">—</div><div class="hist-stat-label">вовремя</div></div>
         <div class="hist-stat"><div class="hist-stat-val" id="histLate">—</div><div class="hist-stat-label">с опозданием</div></div>
+        <div class="hist-stat"><div class="hist-stat-val" id="histItems">—</div><div class="hist-stat-label">отправлений</div></div>
       </div>
       <div class="hist-list" id="histList"></div>
       <div class="btn-row">
