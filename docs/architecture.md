@@ -75,6 +75,7 @@
 | `TIMER_FOUND` | content → bg | `{seconds, url, title, debugInfo}` | `{ok}` |
 | `TIMER_LOST` | content → bg | — (таймер пропал; приёмка завершится через 2 мин) | `{ok}` |
 | `TIMER_CLEAR` | popup → bg | — (кнопка «Сбросить»: завершить приёмку сразу) | `{ok}` |
+| `CARRIAGES_UPDATE` | content → bg | `{items: [{number, source, status, accepted, total}]}` — виджет «Перевозки» на странице приёмки, при изменении | `{ok}` |
 | `CHECK_UPDATE` | popup → bg | — (кнопка «Проверить сейчас») | `{ok, current, latest?, newer?, url?, reason?}` |
 | `TIMER_MANUAL` | popup → bg | `{seconds}` | `{ok}` |
 | `GET_STATE` | popup → bg | — | `{timerState, settings, modeState}` |
@@ -105,6 +106,7 @@
 | `modeState` | bg | `{mode, pauseUntil}` |
 | `bagsSessionStats` | bags-content, popup (сброс) | `{M, L, updatedAt}` |
 | `acceptanceHistory` | bg (popup — показ, CSV, очистка) | `[{id, startedAt, endsAt, deadlineAt, marginMin, source: auto/manual/debug, finishedAt, result, firedFor}]`, не больше 300 |
+| `carriagesState` | bg | `{items, seenAt}` — последнее, что прислал виджет «Перевозки» (для привязки к приёмке, начатой позже) |
 | `updateInfo` | bg | `{checkedAt, latest, url, current, newer, notifiedFor}` — последняя проверка релиза на GitHub |
 
 Значения по умолчанию заведены **в двух местах** (`background.js` `DEFAULT_SETTINGS` и `popup.js` `settings`) — при

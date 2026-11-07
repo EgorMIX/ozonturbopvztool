@@ -8,6 +8,7 @@ CSS-классы (`_timer_hamc7_24`, `ozi__input__root__L1Lw-`) меняются
 |---|---|---|
 | `receiving-timer.html` | `https://turbo-pvz.ozon.ru/receiving-v2/main` | `content.js`: `findTimerElement()`, `parseTimeFromText()` |
 | `issue-bags-block.html` | `https://turbo-pvz.ozon.ru/orders/session-new/<id>` (экран выдачи, блок «Пакет M/L • доступно N») | `bags-content.js`: `findPackageBlocks()` |
+| `carriages-widget.html` | `https://turbo-pvz.ozon.ru/receiving-v2/main`, виджет «Перевозки» (номер, откуда, статус, «Отправления N из M»; номер и хаб заменены) | `content.js`: `findCarriages()` |
 
 Что важно в `issue-bags-block.html`:
 - подпись — `div` с классом, содержащим `paragraph-large`, текст `Пакет M • доступно 2` (разделитель — `•`);

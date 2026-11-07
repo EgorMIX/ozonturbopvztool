@@ -202,6 +202,7 @@ function render(timerState) {
   const manInd  = document.getElementById('manualIndicator');
 
   const deadlineLine = document.getElementById('deadlineLine');
+  document.getElementById('carriageLine').textContent = timerState?.seconds != null ? carriagesText(timerState.carriages) : '';
   if (!timerState || timerState.seconds == null) {
     display.className  = 'timer-display none'; display.textContent = '—';
     sub.textContent    = 'Таймер не обнаружен на странице';
@@ -242,6 +243,15 @@ function render(timerState) {
     badge.textContent = next ? `✅ Следующий: ${next.minutes} мин` : '✅ Мониторинг активен';
     badge.className   = 'badge active';
   }
+}
+
+// «Перевозка №… · отправления 238 из 338 (было 320)» — для карточки и истории
+function carriagesText(list, withNumber = true) {
+  if (!Array.isArray(list) || !list.length) return '';
+  return list.map(c => {
+    const changed = c.totalFirst != null && c.totalFirst !== c.total ? ` (было ${c.totalFirst})` : '';
+    return `${withNumber ? `№${c.number}: ` : ''}отправления ${c.accepted ?? '?'} из ${c.total}${changed}`;
+  }).join('; ');
 }
 
 // ─── Ручной таймер ────────────────────────────────────────────────────────
@@ -845,6 +855,8 @@ function renderHistory() {
     document.getElementById('histTotal').textContent  = recent.length;
     document.getElementById('histOnTime').textContent = recent.filter(e => e.result === 'onTime').length;
     document.getElementById('histLate').textContent   = recent.filter(e => e.result === 'late' || e.result === 'expired').length;
+    document.getElementById('histItems').textContent  = recent.reduce((sum, e) =>
+      sum + (e.carriages || []).reduce((s, c) => s + (c.accepted || 0), 0), 0);
 
     const box = document.getElementById('histList');
     box.textContent = '';
@@ -860,7 +872,9 @@ function renderHistory() {
       const res  = document.createElement('div'); res.className = `hist-res ${e.result}`;
       res.textContent = RESULT_LABELS[e.result] || e.result;
       const det  = document.createElement('div'); det.className = 'hist-detail';
-      det.textContent = `крайний срок ${fmtClock(e.deadlineAt)} · завершено ${fmtClock(e.finishedAt)} · ${SOURCE_LABELS[e.source] || e.source || ''}`;
+      const items = carriagesText(e.carriages);
+      det.textContent = `крайний срок ${fmtClock(e.deadlineAt)} · завершено ${fmtClock(e.finishedAt)} · ${SOURCE_LABELS[e.source] || e.source || ''}` +
+        (items ? `\n${items}` : '');
       row.append(when, res, det);
       box.appendChild(row);
     }
@@ -870,10 +884,16 @@ function renderHistory() {
 // CSV для Excel: разделитель «;», BOM для кириллицы
 function historyCsv(list) {
   const esc = (v) => { const t = String(v ?? ''); return /[";\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
-  const head = ['Дата', 'Начало', 'Крайний срок', 'Конец таймера', 'Завершено', 'Итог', 'Запас, мин', 'Источник', 'Сработавшие пороги, мин'];
-  const rows = list.map(e => [fmtDate(e.startedAt), fmtClock(e.startedAt), fmtClock(e.deadlineAt), fmtClock(e.endsAt),
-    e.finishedAt ? fmtClock(e.finishedAt) : '', RESULT_LABELS[e.result] || e.result, e.marginMin ?? '',
-    SOURCE_LABELS[e.source] || e.source || '', (e.firedFor || []).join(' ')]);
+  const head = ['Дата', 'Начало', 'Крайний срок', 'Конец таймера', 'Завершено', 'Итог', 'Запас, мин', 'Источник',
+    'Сработавшие пороги, мин', 'Перевозка', 'Откуда', 'Принято отправлений', 'Всего в перевозке', 'Всего вначале'];
+  // Перевозок в одной приёмке может быть несколько — по строке на каждую (или одна строка без перевозки)
+  const rows = list.flatMap(e => {
+    const base = [fmtDate(e.startedAt), fmtClock(e.startedAt), fmtClock(e.deadlineAt), fmtClock(e.endsAt),
+      e.finishedAt ? fmtClock(e.finishedAt) : '', RESULT_LABELS[e.result] || e.result, e.marginMin ?? '',
+      SOURCE_LABELS[e.source] || e.source || '', (e.firedFor || []).join(' ')];
+    const cs = e.carriages?.length ? e.carriages : [null];
+    return cs.map(c => [...base, c ? `№${c.number}` : '', c?.source ?? '', c?.accepted ?? '', c?.total ?? '', c?.totalFirst ?? '']);
+  });
   return '﻿' + [head, ...rows].map(r => r.map(esc).join(';')).join('\r\n') + '\r\n';
 }
 
