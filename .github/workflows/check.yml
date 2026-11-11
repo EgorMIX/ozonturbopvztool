@@ -16,3 +16,5 @@ jobs:
       - uses: actions/checkout@v7
       - name: npm run check:strict
         run: node scripts/check.mjs --strict
+      - name: Регрессионные проверки
+        run: npm test

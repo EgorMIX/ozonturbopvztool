@@ -37,7 +37,9 @@ jobs:
           echo "TAG=$tag" >> "$GITHUB_ENV"
 
       - name: Проверка и сборка
-        run: node scripts/pack.mjs
+        run: |
+          npm test
+          node scripts/pack.mjs
 
       - name: Текст релиза из CHANGELOG.md
         run: |

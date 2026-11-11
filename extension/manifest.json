@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Ozon Turbo-PVZ Timer",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Неофициальный помощник для Turbo-PVZ: оповещения до конца приёмки (голос, push, Telegram, ntfy) и авто-пакеты.",
   "minimum_chrome_version": "108",
   "homepage_url": "https://github.com/EgorMIX/ozonturbopvztool",
@@ -19,6 +19,7 @@
     "*://api.telegram.org/*",
     "*://ntfy.sh/*"
   ],
+  "optional_host_permissions": ["https://*/*"],
   "background": {
     "service_worker": "background.js"
   },
