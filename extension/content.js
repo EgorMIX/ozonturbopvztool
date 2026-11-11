@@ -19,6 +19,7 @@
 
   let lastFoundTimer  = null;
   let scanInterval    = null;
+  let scanTimeout     = null;
 
   // ─── Парсинг времени ──────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@
       const h = parseInt(m[1]), min = parseInt(m[2]), sec = parseInt(m[3]);
       if (h <= 23 && min <= 59 && sec <= 59) {
         const total = h * 3600 + min * 60 + sec;
-        if (total > 0 && total <= 86400) return total;
+        if (total >= 0 && total <= 86400) return total;
       }
     }
 
@@ -42,7 +43,7 @@
       const min = parseInt(m[1]), sec = parseInt(m[2]);
       if (min <= 999 && sec <= 59) {
         const total = min * 60 + sec;
-        if (total > 0 && total <= 86400) return total;
+        if (total >= 0 && total <= 86400) return total;
       }
     }
 
@@ -117,6 +118,10 @@
   // «Приёмка» — без исключения запасной поиск принимал его за таймер, когда настоящий пропадал.
   const NOT_TIMER_AREAS = '[class*="_carriagesWidget"]';
   const inNotTimerArea = (el) => Boolean(el.closest?.(NOT_TIMER_AREAS));
+  function isVisible(el) {
+    const style = getComputedStyle(el);
+    return style.visibility !== 'hidden' && style.display !== 'none' && el.getClientRects().length > 0;
+  }
 
   function findTimerElement() {
     // Шаг 1: приоритетные селекторы
@@ -126,6 +131,7 @@
     for (const sel of timerOnlySelectors) {
       const els = document.querySelectorAll(sel);
       for (const el of els) {
+        if (!isVisible(el) || inNotTimerArea(el)) continue;
         const txt     = (el.innerText || el.textContent || '').trim();
         const seconds = parseTimeFromText(txt);
         if (seconds !== null) {
@@ -139,6 +145,7 @@
       if (timerOnlySelectors.includes(sel)) continue;
       const els = document.querySelectorAll(sel);
       for (const el of els) {
+        if (!isVisible(el)) continue;
         const txt     = (el.innerText || el.textContent || '').trim();
         const seconds = parseTimeFromText(txt);
         if (seconds !== null && !inNotTimerArea(el) && hasRelevantContext(el)) {
@@ -219,13 +226,10 @@
     return items;
   }
 
-  let lastCarriagesSig = '';
   function scanCarriages() {
     const items = findCarriages();
     if (!items.length) return;  // виджета нет на этой странице — ничего не шлём
-    const sig = JSON.stringify(items);
-    if (sig === lastCarriagesSig || !chrome.runtime?.id) return;
-    lastCarriagesSig = sig;
+    if (!chrome.runtime?.id) return;
     chrome.runtime.sendMessage({ type: 'CARRIAGES_UPDATE', items }).catch(() => {});
   }
 
@@ -236,7 +240,7 @@
       // Страница не в whitelist — молча игнорируем
       if (lastFoundTimer !== null) {
         lastFoundTimer = null;
-        if (chrome.runtime?.id) chrome.runtime.sendMessage({ type: 'TIMER_LOST' }).catch(() => {});
+        if (chrome.runtime?.id) chrome.runtime.sendMessage({ type: 'TIMER_LOST', reason: 'navigation' }).catch(() => {});
       }
       return;
     }
@@ -276,26 +280,27 @@
 
   // ─── Запуск ───────────────────────────────────────────────────────────────
 
-  setTimeout(() => {
-    scan();
-    scanInterval = setInterval(scan, 10_000);
-  }, 2000);
+  function restartScan() {
+    clearTimeout(scanTimeout);
+    clearInterval(scanInterval);
+    scanInterval = null;
+    scanTimeout = setTimeout(() => {
+      scan();
+      if (chrome.runtime?.id) scanInterval = setInterval(scan, 10_000);
+    }, 2000);
+  }
+  restartScan();
 
   // SPA-навигация
   let lastHref = location.href;
   new MutationObserver(() => {
     if (location.href !== lastHref) {
       lastHref = location.href;
-      lastFoundTimer = null;
-      // Сбрасываем старый интервал чтобы не накапливать при каждом переходе
-      if (scanInterval) {
-        clearInterval(scanInterval);
-        scanInterval = null;
+      if (lastFoundTimer !== null && !isAllowedPage() && chrome.runtime?.id) {
+        chrome.runtime.sendMessage({ type: 'TIMER_LOST', reason: 'navigation' }).catch(() => {});
       }
-      setTimeout(() => {
-        scan();
-        scanInterval = setInterval(scan, 10_000);
-      }, 2000);
+      lastFoundTimer = null;
+      restartScan();
     }
   }).observe(document.body, { childList: true, subtree: true });
 

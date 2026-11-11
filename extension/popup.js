@@ -4,27 +4,25 @@
 // ─── Дефолты ──────────────────────────────────────────────────────────────
 
 // Пороги считаются до крайнего срока завершения приёмки (см. background.js)
-const DEFAULT_THRESHOLDS = [
-  { minutes: 30, text: 'Внимание! Через 30 минут крайний срок завершения приёмки.',  volume: 0.7, enabled: true },
-  { minutes: 15, text: 'Внимание! Через 15 минут крайний срок завершения приёмки!',  volume: 1.0, enabled: true },
-  { minutes: 5,  text: 'Срочно! Через 5 минут крайний срок завершения приёмки!!!',   volume: 1.0, enabled: true },
-];
-const DEFAULT_WORK_HOURS = { enabled: false, from: '08:00', to: '22:00', days: [0, 1, 2, 3, 4, 5, 6] };
+const DEFAULT_WORK_HOURS = PVZSettings.defaults().workHours;
 
-let settings = {
-  thresholds:    JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)),
-  notifType:     'both',
-  theme:         'dark',
-  telegram:      { enabled: false, botToken: '', chatId: '' },
-  ntfy:          { enabled: false, topic: '', server: 'https://ntfy.sh', token: '', priority: 'default' },
-  bagsEnabled:   true,
-  bagsSizes:     'both',  // 'M' | 'L' | 'both'
-  bagsQuota:     { M: 0, L: 0 }, // 0 = без ограничения
-  proxy:         { enabled: false, type: 'socks5', host: '', port: '', username: '', password: '' },
-  finishMarginMin: 1,
-  workHours:     { ...DEFAULT_WORK_HOURS },
-  updateCheck:   true,
-};
+let settings = PVZSettings.defaults();
+
+async function ensureNtfyPermission(ntfy) {
+  if (!ntfy?.enabled) return;
+  const origin = `${new URL(ntfy.server).origin}/*`;
+  if (origin === 'https://ntfy.sh/*') return;
+  const granted = await chrome.permissions.request({ origins: [origin] });
+  if (!granted) throw new Error('Нужен доступ к указанному серверу ntfy');
+}
+
+async function saveSettingsPatch(patch) {
+  PVZSettings.normalize(patch, settings, true);
+  if (patch.ntfy) await ensureNtfyPermission(patch.ntfy);
+  const response = await chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings: patch });
+  if (!response?.ok) throw new Error(response?.reason || 'Не удалось сохранить настройки');
+  return response;
+}
 
 // ─── Тип уведомления ──────────────────────────────────────────────────────
 
@@ -69,7 +67,7 @@ function applyTheme(theme) {
 document.getElementById('themeBtn').addEventListener('click', () => {
   settings.theme = settings.theme === 'dark' ? 'light' : 'dark';
   applyTheme(settings.theme);
-  chrome.storage.local.set({ pvzSettings: settings });
+  saveSettingsPatch({ theme: settings.theme }).catch(e => log(e.message, 'err'));
 });
 
 // ─── Утилиты ──────────────────────────────────────────────────────────────
@@ -83,8 +81,10 @@ function formatTime(s) {
 
 function parseManualInput(val) {
   val = val.trim().replace(/[^0-9:]/g, '');
+  if (!/^\d{1,3}(?::\d{2}){0,2}$/.test(val)) return null;
   const parts = val.split(':').map(Number);
   if (parts.some(isNaN)) return null;
+  if (parts.length > 1 && (parts.at(-1) > 59 || (parts.length === 3 && parts[1] > 59))) return null;
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   if (parts.length === 1 && parts[0] > 0) return parts[0] * 60;
@@ -226,7 +226,7 @@ function render(timerState) {
   manInd.textContent  = timerState.isManual ? '✏️ Ручной режим' : '';
 
   const thresholds = settings.thresholds.filter(t => t.enabled).sort((a, b) => b.minutes - a.minutes);
-  const active     = thresholds.find(t => toDeadline <= t.minutes * 60);
+  const active     = [...thresholds].reverse().find(t => toDeadline <= t.minutes * 60);
 
   if (current === 0) {
     display.className = 'timer-display danger';
@@ -239,7 +239,7 @@ function render(timerState) {
     badge.textContent = `⚠️ Порог ${active.minutes} мин!`; badge.className = 'badge';
   } else {
     display.className = 'timer-display ok';
-    const next = [...thresholds].reverse().find(t => toDeadline > t.minutes * 60);
+    const next = thresholds.find(t => toDeadline > t.minutes * 60);
     badge.textContent = next ? `✅ Следующий: ${next.minutes} мин` : '✅ Мониторинг активен';
     badge.className   = 'badge active';
   }
@@ -259,16 +259,12 @@ function carriagesText(list, withNumber = true) {
 const manualInput = document.getElementById('manualInput');
 manualInput.addEventListener('input', () => {
   document.getElementById('manualErr').style.display = 'none';
-  let v = manualInput.value.replace(/[^0-9]/g, '');
-  if (v.length > 6) v = v.slice(0, 6);
-  if (v.length > 4)      v = v.slice(0,2) + ':' + v.slice(2,4) + ':' + v.slice(4);
-  else if (v.length > 2) v = v.slice(0,2) + ':' + v.slice(2);
-  manualInput.value = v;
+  manualInput.value = manualInput.value.replace(/[^0-9:]/g, '').slice(0, 8);
 });
 
 document.getElementById('btnSetManual').addEventListener('click', () => {
   const seconds = parseManualInput(manualInput.value);
-  if (!seconds || seconds <= 0) { document.getElementById('manualErr').style.display = 'block'; return; }
+  if (!seconds || seconds <= 0 || seconds > 86400) { document.getElementById('manualErr').style.display = 'block'; return; }
   chrome.runtime.sendMessage({ type: 'TIMER_MANUAL', seconds }, (r) => {
     if (r?.ok) { log(`Ручной таймер: ${formatTime(seconds)}`, 'ok'); manualInput.value = ''; }
   });
@@ -327,7 +323,7 @@ document.getElementById('btnAddThreshold').addEventListener('click', () => {
 
 // ─── Сохранение ───────────────────────────────────────────────────────────
 
-document.getElementById('saveBtn').addEventListener('click', () => {
+document.getElementById('saveBtn').addEventListener('click', async () => {
   const btn = document.getElementById('saveBtn');
   const showBtnError = (text) => {
     btn.textContent = text;
@@ -357,36 +353,19 @@ document.getElementById('saveBtn').addEventListener('click', () => {
   settings.speechEnabled = (settings.notifType === 'voice' || settings.notifType === 'both');
   settings.notifEnabled  = (settings.notifType === 'push'  || settings.notifType === 'both');
 
-  chrome.storage.local.set({ pvzSettings: settings }, () => {
-    chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings });
+  try {
+    await saveSettingsPatch(settings);
     log('Настройки сохранены', 'ok');
     btn.textContent = '✅ Сохранено!'; btn.classList.add('saved');
     setTimeout(() => { btn.textContent = '💾 Сохранить настройки'; btn.classList.remove('saved'); }, 1500);
-  });
+  } catch (e) { log(e.message, 'err'); showBtnError(`⚠️ ${e.message}`); }
 });
 
 // ─── Загрузка настроек ────────────────────────────────────────────────────
 
 function loadSettings(cb) {
   chrome.storage.local.get('pvzSettings', (data) => {
-    if (data.pvzSettings) {
-      settings = {
-        thresholds:    data.pvzSettings.thresholds    ?? JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)),
-        notifType:     data.pvzSettings.notifType     ?? 'both',
-        theme:         data.pvzSettings.theme         ?? 'dark',
-        speechEnabled: data.pvzSettings.speechEnabled ?? true,
-        notifEnabled:  data.pvzSettings.notifEnabled  ?? true,
-        telegram:      { enabled: false, botToken: '', chatId: '',                                              ...(data.pvzSettings.telegram || {}) },
-        ntfy:          { enabled: false, topic: '', server: 'https://ntfy.sh', token: '', priority: 'default', ...(data.pvzSettings.ntfy     || {}) },
-        bagsEnabled:   data.pvzSettings.bagsEnabled !== false,
-        bagsSizes:     data.pvzSettings.bagsSizes     ?? 'both',
-        bagsQuota:     { M: data.pvzSettings.bagsQuota?.M ?? 0, L: data.pvzSettings.bagsQuota?.L ?? 0 },
-        proxy:         { enabled: false, type: 'socks5', host: '', port: '', username: '', password: '',        ...(data.pvzSettings.proxy    || {}) },
-        finishMarginMin: data.pvzSettings.finishMarginMin ?? 1,
-        workHours:     { ...DEFAULT_WORK_HOURS, ...(data.pvzSettings.workHours || {}) },
-        updateCheck:   data.pvzSettings.updateCheck !== false,
-      };
-    }
+    settings = PVZSettings.normalize(data.pvzSettings || {});
     applyTheme(settings.theme);
     applyNotifType(settings.notifType);
     document.getElementById('tgEnabled').checked  = settings.telegram.enabled;
@@ -489,7 +468,7 @@ function readNtfyFields() {
   };
 }
 
-document.getElementById('btnTestNtfy').addEventListener('click', () => {
+document.getElementById('btnTestNtfy').addEventListener('click', async () => {
   const status = document.getElementById('ntfyStatus');
   const ntfy   = readNtfyFields();
   if (!ntfy.topic) {
@@ -498,6 +477,8 @@ document.getElementById('btnTestNtfy').addEventListener('click', () => {
     return;
   }
   status.textContent = '⏳ Отправка…'; status.className = 'tg-status';
+  try { await ensureNtfyPermission(ntfy); }
+  catch (e) { status.textContent = e.message; status.className = 'tg-status err'; return; }
   chrome.runtime.sendMessage(
     { type: 'DEBUG_TEST_NTFY', ntfy, text: '🧪 Тест ntfy от Ozon Turbo-PVZ. Всё работает!' },
     (r) => {
@@ -596,15 +577,15 @@ document.getElementById('bagsEnabled').addEventListener('change', () => {
   settings.bagsEnabled = document.getElementById('bagsEnabled').checked;
 });
 
-document.getElementById('saveBagsBtn').addEventListener('click', () => {
+document.getElementById('saveBagsBtn').addEventListener('click', async () => {
   settings.bagsEnabled = document.getElementById('bagsEnabled').checked;
   settings.bagsSizes   = document.querySelector('.bags-size-btn.selected')?.dataset.size || 'both';
-  // SETTINGS_UPDATED не шлём: таймеру эти настройки не нужны, bags-content.js сам ловит storage.onChanged
-  chrome.storage.local.set({ pvzSettings: settings }, () => {
+  try {
+    await saveSettingsPatch({ bagsEnabled: settings.bagsEnabled, bagsSizes: settings.bagsSizes });
     const btn = document.getElementById('saveBagsBtn');
     btn.textContent = '✅ Сохранено!'; btn.classList.add('saved');
     setTimeout(() => { btn.textContent = '💾 Сохранить'; btn.classList.remove('saved'); }, 1500);
-  });
+  } catch (e) { log(e.message, 'err'); }
 });
 
 // ─── Лимит пакетов UI ────────────────────────────────────────────────────
@@ -633,10 +614,10 @@ function updateLimitHints() {
 document.getElementById('bagsLimitM').addEventListener('input', updateLimitHints);
 document.getElementById('bagsLimitL').addEventListener('input', updateLimitHints);
 
-document.getElementById('saveBagsLimitBtn').addEventListener('click', () => {
+document.getElementById('saveBagsLimitBtn').addEventListener('click', async () => {
   settings.bagsQuota = readBagsQuota();
-  // SETTINGS_UPDATED не шлём — см. saveBagsBtn
-  chrome.storage.local.set({ pvzSettings: settings }, () => {
+  try {
+    await saveSettingsPatch({ bagsQuota: settings.bagsQuota });
     const status = document.getElementById('bagsLimitStatus');
     const m = settings.bagsQuota.M, l = settings.bagsQuota.L;
     status.textContent = m === 0 && l === 0
@@ -644,10 +625,10 @@ document.getElementById('saveBagsLimitBtn').addEventListener('click', () => {
       : `✅ Лимит: M=${m || '∞'}, L=${l || '∞'}`;
     status.style.color = 'var(--ok)';
     setTimeout(() => { status.textContent = ''; }, 3000);
-  });
+  } catch (e) { log(e.message, 'err'); }
 });
 
-// Статистика пакетов — читаем из storage, пишет bags-content.js
+// Статистика пакетов — читаем из storage, пишет service worker после подтверждённого клика
 function updateBagsStats() {
   chrome.storage.local.get('bagsSessionStats', (data) => {
     const s  = data.bagsSessionStats || { M: 0, L: 0 };
@@ -683,7 +664,7 @@ function updateBagsStats() {
 
 // Сброс счётчика
 document.getElementById('btnResetBagsStats').addEventListener('click', () => {
-  chrome.storage.local.set({ bagsSessionStats: { M: 0, L: 0, updatedAt: Date.now() } }, () => {
+  chrome.runtime.sendMessage({ type: 'BAGS_RESET' }, () => {
     updateBagsStats();
   });
 });
@@ -807,32 +788,16 @@ document.getElementById('importFile').addEventListener('change', async (e) => {
   if (!file) return;
   let data;
   try { data = JSON.parse(await file.text()); } catch (_) { showBackupStatus('❌ Это не JSON-файл', false); return; }
-  if (data?.app !== BACKUP_APP || typeof data.settings !== 'object' || !data.settings) {
+  if (data?.app !== BACKUP_APP || data.format !== 1 || typeof data.settings !== 'object' || !data.settings || Array.isArray(data.settings)) {
     showBackupStatus('❌ Это не файл настроек Ozon Turbo-PVZ', false); return;
   }
-  const inc = data.settings;
-  if (inc.thresholds !== undefined && !(Array.isArray(inc.thresholds) &&
-      inc.thresholds.every(t => Number.isFinite(Number(t?.minutes)) && typeof (t.text ?? '') === 'string'))) {
-    showBackupStatus('❌ В файле повреждены пороги', false); return;
-  }
-  const next = { ...settings };
-  for (const k of BACKUP_KEYS) {
-    if (inc[k] === undefined) continue;
-    next[k] = (typeof inc[k] === 'object' && !Array.isArray(inc[k]) && inc[k] !== null)
-      ? { ...(settings[k] || {}), ...inc[k] }  // секреты, которых нет в файле, остаются текущими
-      : inc[k];
-  }
-  next.thresholds = next.thresholds.map(t => ({
-    minutes: Math.max(1, Math.round(Number(t.minutes))), text: String(t.text || '').slice(0, 140),
-    volume: Math.min(Math.max(Number(t.volume ?? 1), 0), 1), enabled: t.enabled !== false,
-  }));
-  next.speechEnabled = next.notifType !== 'push';
-  next.notifEnabled  = next.notifType !== 'voice';
-  chrome.storage.local.set({ pvzSettings: next }, () => {
-    chrome.runtime.sendMessage({ type: 'SETTINGS_UPDATED', settings: next });
+  try {
+    const current = (await chrome.storage.local.get('pvzSettings')).pvzSettings || PVZSettings.defaults();
+    const next = PVZSettings.normalize(data.settings, PVZSettings.normalize(current), true);
+    await saveSettingsPatch(next);
     loadSettings();
     showBackupStatus(`✅ Настройки загружены${data.withSecrets ? ' (с токенами)' : ''}`, true);
-  });
+  } catch (err) { showBackupStatus(`❌ ${err.message}`, false); }
 });
 
 // ─── История приёмок ──────────────────────────────────────────────────────
@@ -905,8 +870,12 @@ document.getElementById('btnHistCsv').addEventListener('click', () => {
 });
 
 document.getElementById('btnHistClear').addEventListener('click', () => {
-  if (!confirm('Удалить всю историю приёмок с этого компьютера?')) return;
-  chrome.storage.local.remove('acceptanceHistory', renderHistory);
+  if (!confirm('Удалить прошлую историю приёмок? Текущая приёмка останется.')) return;
+  chrome.runtime.sendMessage({ type: 'HISTORY_CLEAR' }, renderHistory);
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.acceptanceHistory && document.getElementById('tab-history').classList.contains('active')) renderHistory();
 });
 
 // ─── Дебаг-панель ─────────────────────────────────────────────────────────
@@ -1004,25 +973,13 @@ document.getElementById('btnClearAlarms').addEventListener('click', () => {
 });
 
 document.getElementById('btnReset').addEventListener('click', () => {
-  chrome.runtime.sendMessage({ type: 'DEBUG_RESET' }, () => {
-    chrome.storage.local.clear(() => {
-      settings = {
-        thresholds: JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)),
-        notifType: 'both', theme: 'dark',
-        telegram:  { enabled: false, botToken: '', chatId: '' },
-        ntfy:      { enabled: false, topic: '', server: 'https://ntfy.sh', token: '', priority: 'default' },
-        proxy:     { enabled: false, type: 'socks5', host: '', port: '', username: '', password: '' },
-        bagsEnabled: true,
-        bagsSizes:   'both',
-        bagsQuota:   { M: 0, L: 0 },
-        finishMarginMin: 1,
-        workHours:   { ...DEFAULT_WORK_HOURS },
-        updateCheck: true,
-      };
+  chrome.runtime.sendMessage({ type: 'DEBUG_RESET' }, (r) => {
+    if (r?.ok) {
+      settings = PVZSettings.defaults();
       loadSettings();
       render(null);
       log('Полный сброс ✓', 'warn');
-    });
+    } else log(r?.reason || 'Ошибка сброса', 'err');
   });
 });
 

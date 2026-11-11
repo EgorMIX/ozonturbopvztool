@@ -1,8 +1,8 @@
-// bags-content.js — Модуль «Авто-пакеты» v2.1
+// bags-content.js — Модуль «Авто-пакеты» v2.2
 (function () {
   'use strict';
 
-  const VERSION = '2.1';
+  const VERSION = '2.2';
 
   const TARGET_PATTERNS = [
     /\/orders\/session\/\d+\//,
@@ -12,6 +12,7 @@
   let enabled   = true;
   let bagsSizes = 'both'; // 'M' | 'L' | 'both'
   let bagsQuota = { M: 0, L: 0 }; // 0 = без ограничения
+  let mode = 'active';
   let observer  = null;
   let fillTimer = null;
 
@@ -26,7 +27,8 @@
   // ─── Загрузка настройки ───────────────────────────────────────────────────
 
   // Читаем и настройки, и накопленную статистику из storage одним запросом
-  chrome.storage.local.get(['pvzSettings', 'bagsSessionStats'], (data) => {
+  chrome.storage.local.get(['pvzSettings', 'bagsSessionStats', 'modeState'], (data) => {
+    mode = data.modeState?.mode || 'active';
     enabled      = data.pvzSettings?.bagsEnabled !== false;
     bagsSizes    = data.pvzSettings?.bagsSizes   || 'both';
     bagsQuota    = { M: data.pvzSettings?.bagsQuota?.M || 0, L: data.pvzSettings?.bagsQuota?.L || 0 };
@@ -36,6 +38,11 @@
   });
 
   chrome.storage.onChanged.addListener((changes) => {
+    if (!chrome.runtime?.id) { stopObserving(); return; }
+    if (changes.modeState) {
+      mode = changes.modeState.newValue?.mode || 'active';
+      mode === 'disabled' ? stopObserving() : init();
+    }
     if (changes.bagsSessionStats) {
       const s = changes.bagsSessionStats.newValue || {};
       const wasLower = (s.M || 0) < sessionStats.M || (s.L || 0) < sessionStats.L;
@@ -75,7 +82,7 @@
   }
 
   function init() {
-    if (!enabled || !isTargetPage()) return;
+    if (!enabled || mode === 'disabled' || !chrome.runtime?.id || !isTargetPage()) return;
     stopObserving();
     startObserving();
     scheduleFill(400); // первый прогон — чуть позже чтобы DOM успел
@@ -85,6 +92,7 @@
 
   let lastUrl = location.href;
   setInterval(() => {
+    if (!chrome.runtime?.id) { stopObserving(); return; }
     if (location.href === lastUrl) return;
     lastUrl = location.href;
     Object.keys(filled).forEach(k => delete filled[k]);
@@ -191,35 +199,24 @@
     });
   }
 
-  // Сколько ещё можно кликнуть по лимиту (pending — клики текущей серии, ещё не записанные в storage)
-  function quotaLeft(label, pending) {
-    const quota = bagsQuota[label] || 0;
-    if (quota <= 0) return Infinity;
-    return Math.max(quota - (sessionStats[label] || 0) - (pending[label] || 0), 0);
-  }
-
-  // Прибавляем клики серии к статистике: «прочитать → прибавить → записать» один раз в конце серии,
-  // чтобы не затереть сброс из popup и клики из другой вкладки Ozon.
-  async function addStats(pending) {
-    if (!chrome.runtime?.id) return;
-    const data = await chrome.storage.local.get('bagsSessionStats');
-    const s = data.bagsSessionStats || {};
-    sessionStats = { M: (s.M || 0) + (pending.M || 0), L: (s.L || 0) + (pending.L || 0) };
-    await chrome.storage.local.set({ bagsSessionStats: { ...sessionStats, updatedAt: Date.now() } });
+  async function sendBag(message) {
+    if (!chrome.runtime?.id) return { ok: false };
+    try { return await chrome.runtime.sendMessage(message) || { ok: false }; }
+    catch (_) { stopObserving(); return { ok: false }; }
   }
 
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   async function tryFill() {
     if (inFlight) { rerun = true; return; }
-    if (!enabled || !isTargetPage()) return;
+    if (!enabled || mode === 'disabled' || !chrome.runtime?.id || !isTargetPage()) return;
+    const startedUrl = location.href;
 
     const blocks = findPackageBlocks();
     if (blocks.length === 0) return;
 
     inFlight = true;
     rerun    = false;
-    const pending = { M: 0, L: 0 };
     try {
       for (const { label, available, plusBtn, input } of blocks) {
         // Пропускаем размер который не нужно заполнять
@@ -233,7 +230,7 @@
         // Уже заполнено до этого уровня — пропускаем
         if (filled[label] >= available && current >= available) continue;
 
-        const clicks = Math.min(available - current, quotaLeft(label, pending));
+        const clicks = available - current;
         if (clicks <= 0) { filled[label] = available; continue; }
 
         console.log(`[PVZ-Bags v${VERSION}] ${label}: заполняем ${current} → ${current + clicks} из ${available} (+${clicks} кликов)`);
@@ -242,18 +239,29 @@
         for (let i = 0; i < clicks; i++) {
           if (i > 0) await sleep(150);
           // Перед каждым кликом — актуальное состояние: страница, input, лимит
-          if (!enabled || !plusBtn.isConnected || plusBtn.disabled) break;
+          if (!enabled || mode === 'disabled' || location.href !== startedUrl || !plusBtn.isConnected || plusBtn.disabled || !shouldFill(label)) break;
           if ((parseInt(input.value, 10) || 0) >= available) break;
-          if (quotaLeft(label, pending) <= 0) break;
-          plusBtn.click();
-          pending[label]++;
+          const reserve = await sendBag({ type: 'BAGS_RESERVE', label });
+          if (!reserve.ok) break;
+          let added = false;
+          try {
+            if (!enabled || mode === 'disabled' || location.href !== startedUrl || !plusBtn.isConnected || plusBtn.disabled || !shouldFill(label)) break;
+            const before = parseInt(input.value, 10) || 0;
+            if (before >= available) break;
+            plusBtn.click();
+            // Считаем подтверждённое изменение поля, а не попытку нажатия.
+            for (let wait = 0; wait < 20; wait++) {
+              if ((parseInt(input.value, 10) || 0) > before) { added = true; break; }
+              if (!input.isConnected || location.href !== startedUrl) break;
+              await sleep(50);
+            }
+          } finally {
+            await sendBag({ type: 'BAGS_COMMIT', token: reserve.token, added });
+          }
+          if (!added) break;
         }
       }
     } finally {
-      if (pending.M || pending.L) {
-        try { await addStats(pending); }
-        catch (e) { console.log(`[PVZ-Bags v${VERSION}] не удалось сохранить статистику: ${e?.message || e}`); }
-      }
       inFlight = false;
     }
 

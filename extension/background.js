@@ -1,5 +1,6 @@
 // background.js — Service Worker
 'use strict';
+importScripts('settings.js');
 
 const NOTIFY_ID   = 'ozon_pvz_notify';
 const BADGE_ALARM = 'badge_tick';
@@ -9,27 +10,7 @@ const PAUSE_ALARM = 'pause_end';
 
 // Пороги считаются до КРАЙНЕГО СРОКА завершения приёмки (конец таймера минус finishMarginMin):
 // чтобы не получить штраф, приёмку надо программно завершить хотя бы за 1 минуту до конца таймера.
-const DEFAULT_THRESHOLDS = [
-  { minutes: 30, text: 'Внимание! Через 30 минут крайний срок завершения приёмки.',  volume: 0.7, enabled: true },
-  { minutes: 15, text: 'Внимание! Через 15 минут крайний срок завершения приёмки!',  volume: 1.0, enabled: true },
-  { minutes: 5,  text: 'Срочно! Через 5 минут крайний срок завершения приёмки!!!',   volume: 1.0, enabled: true },
-];
-
-const DEFAULT_SETTINGS = {
-  thresholds:    JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)),
-  speechEnabled: true,
-  notifEnabled:  true,
-  notifType:     'both',
-  theme:         'dark',
-  telegram: { enabled: false, botToken: '', chatId: '' },
-  ntfy:     { enabled: false, topic: '', server: 'https://ntfy.sh', token: '', priority: 'default' },
-  proxy:    { enabled: false, type: 'socks5', host: '', port: '', username: '', password: '' },
-  finishMarginMin: 1,  // за сколько минут до конца таймера приёмку нужно завершить (иначе штраф)
-  // Рабочие часы: вне их оповещения не отправляются (таймер и история продолжают работать).
-  // days — дни недели по Date.getDay(): 0 = вс, 1 = пн … 6 = сб. from > to — смена через полночь.
-  workHours: { enabled: false, from: '08:00', to: '22:00', days: [0, 1, 2, 3, 4, 5, 6] },
-  updateCheck: true,   // раз в день проверять новый релиз на GitHub
-};
+const DEFAULT_SETTINGS = PVZSettings.defaults();
 
 let settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
 
@@ -62,6 +43,8 @@ const emptyTimerState = () => ({
   source:           null,  // 'auto' | 'manual' | 'debug'
   deadlineNotified: false, // оповещение «крайний срок» уже отправлено
   carriages:        [],    // перевозки в статусе «Приёмка»: [{number, source, accepted, total, totalFirst}]
+  tabId:            null,  // только вкладка-источник может завершить эту приёмку
+  marginMin:        null,
 });
 let timerState = emptyTimerState();
 
@@ -185,23 +168,26 @@ function acceptanceCarriages(items) {
   return items.filter(c => ACCEPTANCE_STATUS_RE.test(c.status) && c.total != null);
 }
 
-function onCarriagesUpdate(items) {
+function onCarriagesUpdate(items, tabId) {
   const now = Date.now();
-  lastCarriages = { items, seenAt: now };
+  lastCarriages = { items, seenAt: now, tabId };
   chrome.storage.local.set({ carriagesState: lastCarriages });
-  const inAcc = acceptanceCarriages(items);
-  if (!inAcc.length) return;
-  if (timerState.seconds != null) {
-    timerState.carriages = mergeCarriages(timerState.carriages, inAcc);
+  if (timerState.seconds != null && (timerState.tabId == null || timerState.tabId === tabId)) {
+    // Финальный статус тоже содержит итоговые числа. Чужую завершённую перевозку не привязываем.
+    const known = new Set(timerState.carriages.map(c => c.number));
+    const relevant = items.filter(c => known.has(c.number) || ACCEPTANCE_STATUS_RE.test(c.status));
+    timerState.carriages = mergeCarriages(timerState.carriages, relevant);
     chrome.storage.local.set({ timerState });
+    syncActiveHistory();
   }
-  // Таймер уже пропал (приёмку закрыли), а перевозка ещё «Приёмка» — допишем итог в недавнюю запись истории
-  const nums = new Set(inAcc.map(c => c.number));
+  // Дописываем финальные числа после исчезновения таймера только в последнюю связанную запись.
+  const activeId = timerState.sessionId;
   historyUpdate(list => {
-    for (const e of list.slice(-5)) {
-      if (e.id === timerState.sessionId || !e.carriages?.some(c => nums.has(c.number))) continue;
-      if (e.finishedAt != null && now - e.finishedAt > 2 * 3600 * 1000) continue;
-      e.carriages = mergeCarriages(e.carriages, inAcc.filter(c => e.carriages.some(x => x.number === c.number)));
+    for (const c of items) {
+      const e = [...list].reverse().find(entry => entry.carriages?.some(x => x.number === c.number));
+      if (!e || e.id === activeId || (e.tabId != null && e.tabId !== tabId)) continue;
+      if (now - (e.finishedAt ?? e.startedAt) > 2 * 3600 * 1000) continue;
+      e.carriages = mergeCarriages(e.carriages, [c]);
     }
   });
 }
@@ -229,18 +215,29 @@ function historyUpdate(fn) {
 
 function historyStart(st) {
   const entry = {
-    id: st.sessionId, startedAt: st.updatedAt, endsAt: st.endsAt, deadlineAt: st.endsAt - marginSec() * 1000,
-    marginMin: marginSec() / 60, source: st.source, finishedAt: null, result: 'active', firedFor: [],
+    id: st.sessionId, startedAt: st.startedAt ?? st.updatedAt, endsAt: st.endsAt, deadlineAt: st.endsAt - (st.marginMin ?? marginSec() / 60) * 60000,
+    marginMin: st.marginMin ?? marginSec() / 60, source: st.source, tabId: st.tabId, finishedAt: null, result: 'active', firedFor: [...st.firedFor],
     carriages: (st.carriages || []).map(c => ({ ...c })),
   };
-  historyUpdate(list => { list.push(entry); });
+  historyUpdate(list => { if (!list.some(e => e.id === entry.id)) list.push(entry); });
+}
+
+function syncActiveHistory() {
+  if (!timerState.sessionId) return;
+  const st = structuredClone(timerState);
+  historyStart(st); // восстанавливает запись после очистки истории или обновления расширения
+  historyUpdate(list => {
+    const e = list.find(x => x.id === st.sessionId);
+    Object.assign(e, { endsAt: st.endsAt, deadlineAt: st.endsAt - st.marginMin * 60000,
+      marginMin: st.marginMin, carriages: st.carriages, firedFor: st.firedFor, source: st.source });
+  });
 }
 
 // Итог приёмки по моменту, когда таймер пропал со страницы (это и есть «завершили приёмку»)
 function sessionResult(st, reasonCode, now) {
   if (reasonCode === 'cleared') return { result: 'cleared', finishedAt: now };
   const endsAt     = st.endsAt ?? (st.updatedAt + st.seconds * 1000);
-  const deadlineAt = endsAt - marginSec() * 1000;
+  const deadlineAt = endsAt - (st.marginMin ?? marginSec() / 60) * 60000;
   if (st.lostAt != null) {
     return { result: st.lostAt <= deadlineAt ? 'onTime' : (st.lostAt < endsAt ? 'late' : 'expired'), finishedAt: st.lostAt };
   }
@@ -254,6 +251,8 @@ function sessionResult(st, reasonCode, now) {
 
 function historyFinish(st, reasonCode) {
   if (!st.sessionId) return;
+  st = structuredClone(st);
+  historyStart(st);
   const { result, finishedAt } = sessionResult(st, reasonCode, Date.now());
   historyUpdate(list => {
     const e = list.find(x => x.id === st.sessionId);
@@ -270,21 +269,22 @@ function endSession(reason, reasonCode = '') {
   timerState = { ...emptyTimerState(), url: timerState.url };
   chrome.storage.local.set({ timerState });
   chrome.alarms.clear(LOST_GRACE_ALARM);
-  clearThresholdAlarms();
+  cancelThresholdAlarms();
   if (getMode() !== 'disabled') updateBadge(null);
   bgLog(`Приёмка завершена: ${reason}`, 'info');
 }
 
 // Новая приёмка: закрыть предыдущую в истории, завести запись, поставить алармы
-function startSession(seconds, { url, title, source }) {
+function startSession(seconds, { url, title, source, tabId = null }) {
   if (timerState.seconds != null) historyFinish(timerState, '');
   chrome.alarms.clear(LOST_GRACE_ALARM);
   const now = Date.now();
   timerState = {
-    ...emptyTimerState(), seconds, updatedAt: now, endsAt: now + seconds * 1000, url, title,
-    isManual: source === 'manual', source, sessionId: `s${now}`,
+    ...emptyTimerState(), seconds, startedAt: now, updatedAt: now, endsAt: now + seconds * 1000, url, title,
+    isManual: source === 'manual', source, sessionId: `s${now}-${crypto.randomUUID()}`, tabId, marginMin: marginSec() / 60,
     // перевозка могла попасть в виджет «Приёмка» раньше, чем на странице появился таймер
-    carriages: now - lastCarriages.seenAt <= CARRIAGE_FRESH_MS ? mergeCarriages([], acceptanceCarriages(lastCarriages.items)) : [],
+    carriages: now - lastCarriages.seenAt <= CARRIAGE_FRESH_MS && (lastCarriages.tabId == null || lastCarriages.tabId === tabId)
+      ? mergeCarriages([], acceptanceCarriages(lastCarriages.items)) : [],
   };
   chrome.storage.local.set({ timerState });
   historyStart(timerState);
@@ -315,7 +315,7 @@ function setMode(mode, pauseMinutes = 0) {
   } else if (mode === 'disabled') {
     chrome.action.setBadgeText({ text: 'OFF' });
     chrome.action.setBadgeBackgroundColor({ color: '#555' });
-    clearThresholdAlarms();
+    cancelThresholdAlarms();
     bgLog('Плагин отключён', 'warn');
   } else if (mode === 'active') {
     bgLog('Мониторинг активен', 'ok');
@@ -471,6 +471,7 @@ async function sendTelegram(text, isTest = false, tgCfg = null) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: tg.chatId, text: `📦 Ozon Turbo-PVZ\n${text}` }),
+      signal: AbortSignal.timeout(15000),
     });
     const data = await resp.json();
     if (data.ok) { bgLog(`Telegram: отправлено${isTest ? ' (тест)' : ''}`, isTest ? 'info' : 'warn'); return { ok: true }; }
@@ -514,7 +515,11 @@ async function sendNtfy(text, title = 'Ozon Turbo-PVZ', isTest = false, nCfg = n
   });
 
   try {
-    const resp = await fetch(`${server}`, { method: 'POST', headers, body });
+    const origin = `${new URL(server).origin}/*`;
+    if (origin !== 'https://ntfy.sh/*' && !(await chrome.permissions.contains({ origins: [origin] }))) {
+      return { ok: false, reason: 'Нет доступа к серверу ntfy — сохраните настройки и разрешите доступ' };
+    }
+    const resp = await fetch(`${server}`, { method: 'POST', headers, body, signal: AbortSignal.timeout(15000) });
     if (resp.ok) { bgLog(`ntfy: отправлено${isTest ? ' (тест)' : ''}`, isTest ? 'info' : 'warn'); return { ok: true }; }
     const err = await resp.text().catch(() => String(resp.status));
     bgLog(`ntfy ошибка ${resp.status}: ${err}`, 'err');
@@ -524,9 +529,9 @@ async function sendNtfy(text, title = 'Ozon Turbo-PVZ', isTest = false, nCfg = n
 
 // ─── Алармы ───────────────────────────────────────────────────────────────
 
-chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 10 / 60 });
+chrome.alarms.create(BADGE_ALARM, { periodInMinutes: 1 });
 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
+chrome.alarms.onAlarm.addListener((alarm) => enqueueState(async () => {
   await ready;
   if (alarm.name === PAUSE_ALARM) { bgLog('Пауза завершена', 'ok'); setMode('active'); return; }
   if (alarm.name === LOST_GRACE_ALARM) {
@@ -538,6 +543,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     if (getMode() === 'disabled') return;
     const current = remainingSeconds();
     if (current === 0) {
+      fireDeadline(current);
       endSession('время таймера вышло');
     } else if (current != null) {
       updateBadge(current);
@@ -549,40 +555,57 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   if (alarm.name === DEADLINE_ALARM) {
     const current = remainingSeconds();
-    if (current != null && current > 0) fireDeadline(current);
+    if (current != null && deadlineSeconds() === 0) fireDeadline(current);
     return;
   }
   if (alarm.name.startsWith('threshold_')) {
     const mins = parseInt(alarm.name.split('_')[1]);
     bgLog(`Аларм порога ${mins} мин`, 'warn');
     const toDeadline = deadlineSeconds();
-    if (toDeadline != null) fireThreshold(mins, toDeadline);
+    if (toDeadline != null && toDeadline > 0 && toDeadline <= mins * 60) fireThreshold(mins, toDeadline);
   }
-});
+}));
 
 // ─── Пороги ───────────────────────────────────────────────────────────────
 
 // remainingSeconds — остаток таймера Ozon. Пороги считаются до крайнего срока (остаток − запас),
 // в сам крайний срок — отдельный аларм DEADLINE_ALARM.
-async function scheduleThresholdAlarms(remainingSeconds) {
-  await clearThresholdAlarms();
-  const toDeadline = Math.max(remainingSeconds - marginSec(), 0);
-  const enabled = settings.thresholds.filter(t => t.enabled);
-  for (let idx = 0; idx < enabled.length; idx++) {
-    const t = enabled[idx];
-    const fireInSec = toDeadline - t.minutes * 60;
-    if (fireInSec > 0) {
-      await chrome.alarms.create(`threshold_${t.minutes}_${idx}`, { delayInMinutes: fireInSec / 60 });
-      bgLog(`Аларм ${t.minutes} мин до крайнего срока: через ${Math.round(fireInSec / 60)} мин`, 'ok');
-    } else if (toDeadline > 0 && toDeadline <= t.minutes * 60) {
-      if (!timerState.firedFor.includes(t.minutes)) fireThreshold(t.minutes, toDeadline);
+let alarmQueue = Promise.resolve();
+let alarmGeneration = 0;
+function cancelThresholdAlarms() {
+  alarmGeneration++;
+  alarmQueue = alarmQueue.then(clearThresholdAlarms).catch(e => bgLog(`Алармы: ${e.message}`, 'err'));
+  return alarmQueue;
+}
+
+function scheduleThresholdAlarms(_remainingSeconds) {
+  const generation = ++alarmGeneration;
+  alarmQueue = alarmQueue.then(async () => {
+    await clearThresholdAlarms();
+    if (generation !== alarmGeneration || timerState.seconds == null || getMode() === 'disabled') return;
+    const remaining = remainingSeconds();
+    const toDeadline = Math.max(remaining - marginSec(), 0);
+    const enabled = settings.thresholds.filter(t => t.enabled);
+    for (let idx = 0; idx < enabled.length; idx++) {
+      if (generation !== alarmGeneration) return;
+      const t = enabled[idx];
+      if (timerState.firedFor.includes(t.minutes)) continue;
+      const fireInSec = toDeadline - t.minutes * 60;
+      if (fireInSec > 0) {
+        await chrome.alarms.create(`threshold_${t.minutes}_${idx}`, { when: sessionDeadlineAt() - t.minutes * 60000 });
+        bgLog(`Аларм ${t.minutes} мин до крайнего срока: через ${Math.round(fireInSec / 60)} мин`, 'ok');
+      } else if (toDeadline > 0) {
+        fireThreshold(t.minutes, toDeadline);
+      }
     }
-  }
-  if (toDeadline > 0) {
-    await chrome.alarms.create(DEADLINE_ALARM, { delayInMinutes: toDeadline / 60 });
-  } else if (remainingSeconds > 0) {
-    fireDeadline(remainingSeconds);
-  }
+    if (generation !== alarmGeneration) return;
+    if (toDeadline > 0) {
+      await chrome.alarms.create(DEADLINE_ALARM, { when: sessionDeadlineAt() });
+    } else {
+      fireDeadline(remaining);
+    }
+  }).catch(e => bgLog(`Алармы: ${e.message}`, 'err'));
+  return alarmQueue;
 }
 
 function checkThresholds(remainingSeconds) {
@@ -592,7 +615,7 @@ function checkThresholds(remainingSeconds) {
       fireThreshold(t.minutes, toDeadline);
     }
   }
-  if (toDeadline === 0 && remainingSeconds > 0) fireDeadline(remainingSeconds);
+  if (toDeadline === 0) fireDeadline(remainingSeconds);
 }
 
 // toDeadline — секунд до крайнего срока
@@ -840,7 +863,7 @@ async function openUpdatePage() {
 // Кто что может слать: content-скрипты (вкладка Ozon) — только данные таймера; всё остальное — только
 // страницы самого расширения (popup). Страница Ozon до runtime не дотянется (нет externally_connectable),
 // это защита на случай ошибки в content-скрипте.
-const CONTENT_MSG_TYPES = new Set(['TIMER_FOUND', 'TIMER_LOST', 'CARRIAGES_UPDATE']);
+const CONTENT_MSG_TYPES = new Set(['TIMER_FOUND', 'TIMER_LOST', 'CARRIAGES_UPDATE', 'BAGS_RESERVE', 'BAGS_COMMIT']);
 function isAllowedSender(msg, sender) {
   if (sender.id !== chrome.runtime.id) return false;
   // Страница расширения (popup — и всплывающим окном, и открытая во вкладке) — по адресу, а не по sender.tab
@@ -848,17 +871,32 @@ function isAllowedSender(msg, sender) {
   return Boolean(sender.tab) && CONTENT_MSG_TYPES.has(msg?.type) && OZON_PAGE_RE.test(sender.url || '');
 }
 
+let messageQueue = Promise.resolve();
+function enqueueState(task) {
+  messageQueue = messageQueue.then(async () => { await ready; await task(); await Promise.all([historyQueue, alarmQueue]); })
+    .catch(e => bgLog(`Состояние: ${e.message}`, 'err'));
+  return messageQueue;
+}
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!isAllowedSender(msg, sender)) {
     bgLog(`Отклонено сообщение ${String(msg?.type).slice(0, 40)} от ${sender.tab ? 'вкладки' : 'неизвестного отправителя'}`, 'err');
     sendResponse({ ok: false, reason: 'forbidden' });
     return false;
   }
-  ready.then(() => handleMessage(msg, sender, sendResponse));
+  messageQueue = messageQueue.then(async () => {
+    await ready;
+    await new Promise(resolve => {
+      const reply = result => {
+        Promise.all([historyQueue, alarmQueue]).then(() => { sendResponse(result); resolve(); });
+      };
+      try { Promise.resolve(handleMessage(msg, sender, reply)).catch(e => reply({ ok: false, reason: e.message })); }
+      catch (e) { reply({ ok: false, reason: e.message }); }
+    });
+  }).catch(e => { bgLog(`Сообщение: ${e.message}`, 'err'); sendResponse({ ok: false, reason: 'internal_error' }); });
   return true;
 });
 
-function handleMessage(msg, _sender, sendResponse) {
+async function handleMessage(msg, sender, sendResponse) {
 
   if (msg.type === 'TIMER_FOUND') {
     if (getMode() === 'disabled') { sendResponse({ ok: true }); return true; }
@@ -869,6 +907,15 @@ function handleMessage(msg, _sender, sendResponse) {
     // Та же приёмка, если время окончания совпадает с точностью до SESSION_TOLERANCE_MS
     // (в том числе после кратковременного исчезновения таймера при ререндере страницы)
     const sameSession = prevEndsAt != null && Math.abs(endsAt - prevEndsAt) <= SESSION_TOLERANCE_MS;
+    // Другая открытая вкладка не подменяет активный таймер. Источник можно подхватить после его закрытия.
+    if (timerState.tabId != null && timerState.tabId !== sender.tab.id && prevEndsAt > now) {
+      try {
+        const tab = await chrome.tabs.get(timerState.tabId);
+        if (!tab.url || /^https:\/\/turbo-pvz\.ozon\.ru\/receiving/.test(tab.url)) { sendResponse({ ok: true, ignored: true }); return; }
+        timerState.tabId = sender.tab.id;
+      }
+      catch (_) { timerState.tabId = sender.tab.id; }
+    }
 
     if (sameSession) {
       if (timerState.lostAt != null) {
@@ -877,13 +924,15 @@ function handleMessage(msg, _sender, sendResponse) {
       }
       timerState = {
         ...timerState, seconds: msg.seconds, updatedAt: now, endsAt, lostAt: null, url: msg.url, title: msg.title,
-        isManual: false, source: timerState.source === 'debug' ? 'debug' : 'auto', // ручной таймер «подхватила» страница
+        isManual: false, source: timerState.source === 'debug' ? 'debug' : 'auto', tabId: sender.tab.id,
       };
       chrome.storage.local.set({ timerState });
       updateBadge(msg.seconds);
+      syncActiveHistory();
+      if (Math.abs(endsAt - prevEndsAt) > 1000) scheduleThresholdAlarms(msg.seconds);
     } else {
       bgLog(`Таймер ${prevEndsAt != null ? 'новой приёмки' : 'обнаружен'}: ${fmt(msg.seconds)}${msg.debugInfo ? ` | ${msg.debugInfo}` : ''}`, 'ok');
-      startSession(msg.seconds, { url: msg.url, title: msg.title, source: 'auto' });
+      startSession(msg.seconds, { url: msg.url, title: msg.title, source: 'auto', tabId: sender.tab.id });
     }
     if (!timerState.startNotified) {
       timerState.startNotified = true;
@@ -895,6 +944,7 @@ function handleMessage(msg, _sender, sendResponse) {
   }
 
   else if (msg.type === 'TIMER_MANUAL') {
+    if (!Number.isFinite(msg.seconds) || msg.seconds <= 0 || msg.seconds > 86400) { sendResponse({ ok: false, reason: 'bad_seconds' }); return; }
     bgLog(`Ручной таймер: ${fmt(msg.seconds)}`, 'ok');
     startSession(msg.seconds, { url: timerState.url, title: 'Ручной', source: 'manual' });
     timerState.startNotified = true;
@@ -904,6 +954,9 @@ function handleMessage(msg, _sender, sendResponse) {
   }
 
   else if (msg.type === 'TIMER_LOST') {
+    if (timerState.tabId != null && timerState.tabId !== sender.tab.id) { sendResponse({ ok: true, ignored: true }); return; }
+    // Навигация не доказывает завершение приёмки: продолжаем отсчёт, не ставим ложное «вовремя».
+    if (msg.reason === 'navigation') { sendResponse({ ok: true }); return; }
     // Не стираем приёмку сразу: таймер мог пропасть на секунду при ререндере страницы.
     // Если за LOST_GRACE_MIN он не появится с тем же endsAt — аларм LOST_GRACE_ALARM завершит сессию.
     const current = remainingSeconds();
@@ -919,7 +972,7 @@ function handleMessage(msg, _sender, sendResponse) {
   }
 
   else if (msg.type === 'CARRIAGES_UPDATE') {
-    onCarriagesUpdate(sanitizeCarriages(msg.items));
+    onCarriagesUpdate(sanitizeCarriages(msg.items), sender.tab.id);
     sendResponse({ ok: true });
   }
 
@@ -943,22 +996,62 @@ function handleMessage(msg, _sender, sendResponse) {
   }
 
   else if (msg.type === 'SETTINGS_UPDATED') {
-    settings = {
-      ...settings,
-      ...msg.settings,
-      telegram: { ...settings.telegram, ...(msg.settings.telegram || {}) },
-      ntfy:     { ...settings.ntfy,     ...(msg.settings.ntfy     || {}) },
-      proxy:    { ...settings.proxy,    ...(msg.settings.proxy     || {}) },
-    };
-    if (msg.settings.notifType) {
-      settings.speechEnabled = msg.settings.notifType !== 'push';
-      settings.notifEnabled  = msg.settings.notifType !== 'voice';
+    settings = PVZSettings.normalize(msg.settings, settings, true);
+    await chrome.storage.local.set({ pvzSettings: settings });
+    const timerChanged = ['thresholds', 'finishMarginMin', 'workHours', 'notifType'].some(k => k in msg.settings);
+    if (timerState.seconds != null && timerChanged) {
+      timerState.marginMin = marginSec() / 60;
+      await chrome.storage.local.set({ timerState });
+      syncActiveHistory();
     }
     if (msg.settings.proxy !== undefined) applyProxy();
     bgLog('Настройки обновлены', 'info');
     // firedFor не сбрасываем: пересоздаём алармы только для ещё не сработавших порогов
     const current = remainingSeconds();
-    if (current != null) scheduleThresholdAlarms(current);
+    if (current != null && timerChanged) scheduleThresholdAlarms(current);
+    sendResponse({ ok: true, settings });
+  }
+
+  else if (msg.type === 'BAGS_RESERVE') {
+    const label = msg.label;
+    if (!['M', 'L'].includes(label) || !/\/orders\/session(?:-new)?\/\d+(?:\/|$)/.test(new URL(sender.url).pathname)) {
+      sendResponse({ ok: false, reason: 'bad_bag_request' }); return;
+    }
+    const data = await chrome.storage.local.get(['bagsSessionStats', 'bagsReservations']);
+    const stats = data.bagsSessionStats || { M: 0, L: 0 };
+    const reservations = (data.bagsReservations || []).filter(r => r.expiresAt > Date.now());
+    const used = (stats[label] || 0) + reservations.filter(r => r.label === label).length;
+    const quota = settings.bagsQuota[label];
+    if (getMode() === 'disabled' || !settings.bagsEnabled || (settings.bagsSizes !== 'both' && settings.bagsSizes !== label) || (quota > 0 && used >= quota)) {
+      sendResponse({ ok: false, reason: 'bags_limit_or_disabled' }); return;
+    }
+    const token = crypto.randomUUID();
+    reservations.push({ token, label, tabId: sender.tab.id, expiresAt: Date.now() + 120000 });
+    await chrome.storage.local.set({ bagsReservations: reservations });
+    sendResponse({ ok: true, token });
+  }
+
+  else if (msg.type === 'BAGS_COMMIT') {
+    const data = await chrome.storage.local.get(['bagsSessionStats', 'bagsReservations']);
+    const reservations = data.bagsReservations || [];
+    const r = reservations.find(entry => entry.token === msg.token && entry.tabId === sender.tab.id);
+    if (!r) { sendResponse({ ok: false, reason: 'unknown_reservation' }); return; }
+    const stats = data.bagsSessionStats || { M: 0, L: 0 };
+    if (msg.added === true) stats[r.label] = (stats[r.label] || 0) + 1;
+    await chrome.storage.local.set({ bagsSessionStats: { ...stats, updatedAt: Date.now() },
+      bagsReservations: reservations.filter(entry => entry.token !== r.token) });
+    sendResponse({ ok: true });
+  }
+
+  else if (msg.type === 'BAGS_RESET') {
+    await chrome.storage.local.set({ bagsSessionStats: { M: 0, L: 0, updatedAt: Date.now() }, bagsReservations: [] });
+    sendResponse({ ok: true });
+  }
+
+  else if (msg.type === 'HISTORY_CLEAR') {
+    await historyQueue;
+    await chrome.storage.local.remove(HISTORY_KEY);
+    syncActiveHistory();
     sendResponse({ ok: true });
   }
 
@@ -970,52 +1063,51 @@ function handleMessage(msg, _sender, sendResponse) {
   else if (msg.type === 'DEBUG_TEST_SPEECH') {
     const mins = msg.minutes ?? settings.thresholds[1]?.minutes ?? 15;
     const t    = settings.thresholds.find(th => th.minutes === mins);
-    speakInTab(t?.text ?? `Тест. Осталось ${mins} минут.`, true, t?.volume ?? 1.0)
-      .then(sendResponse);
+    sendResponse(await speakInTab(t?.text ?? `Тест. Осталось ${mins} минут.`, true, t?.volume ?? 1.0));
     return true;
   }
 
   // Тесты не трогают рабочие settings: данные из полей popup передаются параметром
   else if (msg.type === 'DEBUG_TEST_TELEGRAM') {
     const tgCfg = msg.botToken && msg.chatId ? { enabled: true, botToken: msg.botToken, chatId: msg.chatId } : null;
-    sendTelegram(msg.text || '🧪 Тест-сообщение от Ozon Turbo-PVZ.', true, tgCfg).then(sendResponse);
+    sendResponse(await sendTelegram(msg.text || '🧪 Тест-сообщение от Ozon Turbo-PVZ.', true, tgCfg));
     return true;
   }
 
   else if (msg.type === 'DEBUG_TEST_NTFY') {
     const nCfg = msg.ntfy ? { ...settings.ntfy, ...msg.ntfy, enabled: true } : null;
-    sendNtfy(msg.text || '🧪 Тест ntfy от Ozon Turbo-PVZ. Всё работает!', 'Ozon Turbo-PVZ — Тест', true, nCfg)
-      .then(sendResponse);
+    sendResponse(await sendNtfy(msg.text || '🧪 Тест ntfy от Ozon Turbo-PVZ. Всё работает!', 'Ozon Turbo-PVZ — Тест', true, nCfg));
     return true;
   }
 
   else if (msg.type === 'DEBUG_TEST_PROXY') {
     if (proxyTestOverride) { sendResponse({ ok: false, reason: 'тест прокси уже идёт — дождитесь результата' }); return true; }
     proxyTestOverride = { ...msg.proxy, enabled: true };
-    (async () => {
+    const result = await (async () => {
       try {
         const applied = await applyProxy();
-        if (!applied.ok) { sendResponse(applied); return; }
+        if (!applied.ok) return applied;
         const resp = await fetch(`https://api.telegram.org/bot${msg.botToken}/getMe`, { signal: AbortSignal.timeout(15000) });
-        if (resp.status === 407) { sendResponse({ ok: false, reason: 'прокси требует логин/пароль или отклонил их (HTTP 407)' }); return; }
+        if (resp.status === 407) return { ok: false, reason: 'прокси требует логин/пароль или отклонил их (HTTP 407)' };
         const data = await resp.json();
         if (data.ok) {
           bgLog(`Прокси тест OK: @${data.result.username}`, 'ok');
-          sendResponse({ ok: true, botName: data.result.username });
+          return { ok: true, botName: data.result.username };
         } else {
-          sendResponse({ ok: false, reason: data.description });
+          return { ok: false, reason: data.description };
         }
       } catch (e) {
         const reason = e?.name === 'TimeoutError'
           ? 'нет ответа за 15 с — прокси недоступен или не пропускает Telegram'
           : `${e.message} — прокси недоступен, неверный тип/порт или логин`;
         bgLog(`Прокси тест: ${reason}`, 'err');
-        sendResponse({ ok: false, reason });
+        return { ok: false, reason };
       } finally {
         proxyTestOverride = null;
         await applyProxy();
       }
     })();
+    sendResponse(result);
     return true;
   }
 
@@ -1040,18 +1132,22 @@ function handleMessage(msg, _sender, sendResponse) {
   }
 
   else if (msg.type === 'DEBUG_RESET') {
-    chrome.alarms.getAll().then(async alarms => {
-      for (const a of alarms) if (a.name !== BADGE_ALARM) await chrome.alarms.clear(a.name);
-    });
+    await historyQueue;
+    await cancelThresholdAlarms();
+    for (const a of await chrome.alarms.getAll()) if (a.name !== BADGE_ALARM) await chrome.alarms.clear(a.name);
     timerState = emptyTimerState();
     settings   = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
     modeState  = { mode: 'active', pauseUntil: null };
-    chrome.storage.local.set({ modeState });
-    clearProxy();
+    await clearProxy();
+    await chrome.storage.local.clear();
+    await chrome.storage.local.set({ modeState, pvzSettings: settings });
+    lastCarriages = { items: [], seenAt: 0 };
+    await ensureUpdateAlarm();
     updateBadge(null);
     bgLog('[DEBUG] Полный сброс', 'warn');
     sendResponse({ ok: true });
   }
+  else sendResponse({ ok: false, reason: 'unknown_message' });
 }
 
 // ─── Старт ────────────────────────────────────────────────────────────────
@@ -1064,25 +1160,30 @@ const ready = chrome.storage.local.get(['timerState', 'pvzSettings', 'modeState'
   .then(applyLoadedState)
   .catch((e) => bgLog(`Ошибка загрузки состояния: ${e?.message || e}`, 'err'));
 
-function applyLoadedState(data) {
+async function applyLoadedState(data) {
   if (data.pvzSettings) {
-    settings = {
-      ...DEFAULT_SETTINGS,
-      ...data.pvzSettings,
-      telegram: { ...DEFAULT_SETTINGS.telegram, ...(data.pvzSettings.telegram || {}) },
-      ntfy:     { ...DEFAULT_SETTINGS.ntfy,     ...(data.pvzSettings.ntfy     || {}) },
-      proxy:    { ...DEFAULT_SETTINGS.proxy,     ...(data.pvzSettings.proxy    || {}) },
-      workHours: { ...DEFAULT_SETTINGS.workHours, ...(data.pvzSettings.workHours || {}) },
-    };
+    settings = PVZSettings.normalize(data.pvzSettings);
     if (settings.notifType) {
       settings.speechEnabled = settings.notifType !== 'push';
       settings.notifEnabled  = settings.notifType !== 'voice';
     }
   }
   if (data.timerState) timerState = data.timerState;
+  timerState = { ...emptyTimerState(), ...timerState };
   if (data.modeState)  modeState  = data.modeState;
+  if (modeState.mode === 'paused' && modeState.pauseUntil > Date.now()) chrome.alarms.create(PAUSE_ALARM, { when: modeState.pauseUntil });
   if (data.carriagesState?.items) lastCarriages = data.carriagesState;
   if (!Array.isArray(timerState.carriages)) timerState.carriages = [];
+  if (!Array.isArray(timerState.firedFor)) timerState.firedFor = [];
+  if (timerState.seconds != null) {
+    timerState.endsAt = sessionEndsAt();
+    timerState.sessionId ||= `s${timerState.updatedAt || Date.now()}-${crypto.randomUUID()}`;
+    timerState.source ||= timerState.isManual ? 'manual' : 'auto';
+    timerState.marginMin = marginSec() / 60;
+    await chrome.storage.local.set({ timerState });
+    syncActiveHistory();
+    if (timerState.lostAt != null) chrome.alarms.create(LOST_GRACE_ALARM, { when: Math.max(Date.now() + 1, timerState.lostAt + LOST_GRACE_MIN * 60000) });
+  }
 
   applyProxy();
   ensureUpdateAlarm();
@@ -1093,5 +1194,6 @@ function applyLoadedState(data) {
     chrome.action.setBadgeBackgroundColor({ color: '#555' });
   } else if (timerState.seconds != null) {
     updateBadge(remainingSeconds());
+    scheduleThresholdAlarms(remainingSeconds());
   }
 }
